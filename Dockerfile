@@ -2,9 +2,10 @@ FROM condaforge/miniforge3:latest
 
 WORKDIR /app
 
-# Install cadquery and dependencies in one go
+# Install cadquery and all dependencies including cascadio
 RUN mamba install -y -c conda-forge \
     cadquery \
+    pyocc \
     trimesh \
     fastapi \
     uvicorn \
