@@ -1,6 +1,6 @@
-FROM blenderkit/headless-blender:latest
+FROM blenderkit/headless-blender:blender-5.1
 
-# Extra libs voor fonts + GL (voor text en Meshy import)
+# Extra deps voor fonts en GL (nodig voor text en Meshy imports)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     libfreetype6 libfontconfig1 \
@@ -9,15 +9,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Jouw code
 COPY main.py blender_process.py ./
 
-# Blender staat in deze image op /home/headless/blender
-RUN ln -s /home/headless/blender/blender /usr/local/bin/blender
+# Blender path in deze image is /home/headless/blenders/5.1/blender (of vergelijkbaar)
+# Maak een symlink voor eenvoud
+RUN ln -s /home/headless/blenders/5.1/blender /usr/local/bin/blender
 
 EXPOSE 8080
 
