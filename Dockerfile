@@ -1,12 +1,14 @@
 FROM mambaorg/micromamba:latest
 
 # Install system dependencies required by CadQuery and graphics libraries
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     libgl1 \
     libxrender1 \
     libxkbcommon0 \
-    libdbus-1-3 \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    libdbus-1-3 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER . /app
 WORKDIR /app
