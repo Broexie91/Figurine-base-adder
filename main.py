@@ -62,20 +62,28 @@ async def generate_base(request: BaseGenerationRequest):
         # Create the cylindrical base
         base = cq.Workplane("XY").circle(base_radius).extrude(base_height)
 
-        # 5. Add text on the front vertical part of the base
+        # 5. Add text on the base (if provided)
         if request.text_label:
-            # Create text on the front face of the base
-            text_wall_depth = 2  # 2mm depth for text engraving
-            font_size = base_height * 0.8  # Scale font size with base height
-            
-            # Add text to the top face, positioned at the front
-            workplane = base.faces(">Z").workplane()
-            workplane = workplane.moveTo(0, -base_radius + text_wall_depth).text(
-                request.text_label, 
-                fontsize=font_size, 
-                distance=text_wall_depth
-            )
-            base = workplane.cutThruAll()
+            try:
+                # Create a separate text object and engrave it
+                font_size = max(2, base_height * 0.6)  # Scale font size appropriately
+                text_depth = 0.5  # Shallow engraving
+                
+                # Create text as a separate solid
+                text_solid = cq.Workplane("XY").text(
+                    request.text_label,
+                    fontsize=font_size,
+                    distance=text_depth
+                )
+                
+                # Move text to the top of the base
+                text_solid = text_solid.translate((0, 0, base_height - text_depth))
+                
+                # Cut the text from the base
+                base = base.cut(text_solid)
+            except Exception as text_error:
+                # If text fails, just continue without text
+                print(f"Warning: Text engraving failed: {str(text_error)}")
 
         # 6. Export base as step file
         base_step = f"base_{request.order_id}.step"
