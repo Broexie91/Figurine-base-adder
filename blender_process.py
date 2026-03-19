@@ -3,6 +3,16 @@ import sys
 import math
 from mathutils import Vector
 
+def get_bounds(objs):
+    bmin = Vector((float('inf'),)*3)
+    bmax = Vector((-float('inf'),)*3)
+    for obj in objs:
+        for corner in obj.bound_box:
+            v = obj.matrix_world @ Vector(corner)
+            bmin = Vector(min(a,b) for a,b in zip(bmin,v))
+            bmax = Vector(max(a,b) for a,b in zip(bmax,v))
+    return bmin, bmax
+
 argv = sys.argv[sys.argv.index("--") + 1:]
 input_path = argv[0]
 output_path = argv[1]
@@ -100,14 +110,3 @@ bpy.ops.export_scene.gltf(
 )
 
 print("SUCCESS: Exported", output_path)
-
-
-def get_bounds(objs):
-    bmin = Vector((float('inf'),)*3)
-    bmax = Vector((-float('inf'),)*3)
-    for obj in objs:
-        for corner in obj.bound_box:
-            v = obj.matrix_world @ Vector(corner)
-            bmin = Vector(min(a,b) for a,b in zip(bmin,v))
-            bmax = Vector(max(a,b) for a,b in zip(bmax,v))
-    return bmin, bmax
