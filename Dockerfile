@@ -1,28 +1,25 @@
-FROM python:3.11-slim
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    wget python3 python3-pip \
+    libgl1 libxi6 libxrender1 libxkbcommon0 libsm6 libice6 libglib2.0-0 \
+    libfreetype6 libfontconfig1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Blender 5.1.0 (nieuwste versie maart 2026)
+RUN wget https://download.blender.org/release/Blender5.1/blender-5.1.0-linux-x64.tar.xz -O /tmp/blender.tar.xz && \
+    tar -xJf /tmp/blender.tar.xz -C /opt/ && \
+    mv /opt/blender-5.1.0-linux-x64 /opt/blender && \
+    ln -s /opt/blender/blender /usr/local/bin/blender && \
+    rm /tmp/blender.tar.xz
 
 WORKDIR /app
 
-# Install only the essential system libraries that actually exist in Debian slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
-    libxrender1 \
-    libxkbcommon0 \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Upgrade pip first
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+COPY main.py blender_process.py ./
 
-# Install CadQuery with pre-built wheels
-RUN pip install --no-cache-dir \
-    cadquery==2.4.0 \
-    trimesh \
-    fastapi \
-    uvicorn \
-    requests \
-    numpy
+EXPOSE 8000
 
-COPY . /app
-
-EXPOSE 8080
-
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
