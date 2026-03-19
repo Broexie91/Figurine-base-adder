@@ -64,13 +64,17 @@ async def generate_base(request: BaseGenerationRequest):
 
         # 5. Add text on the front vertical part of the base
         if request.text_label:
-            # Create a thin rectangular wall for text on the front
-            text_wall_depth = 2  # 2mm depth for text
-            text_wall_height = base_height * 0.6  # Use 60% of base height for text
-            # Add text to the front face
+            # Create text on the front face of the base
+            text_wall_depth = 2  # 2mm depth for text engraving
+            font_size = base_height * 0.8  # Scale font size with base height
+            
+            # Add text to the top face, positioned at the front
             workplane = base.faces(">Z").workplane()
-            # Top face
-            workplane = workplane.moveTo(0, -base_radius + text_wall_depth).text(request.text_label, height=text_wall_height * 0.8, depth=text_wall_depth)
+            workplane = workplane.moveTo(0, -base_radius + text_wall_depth).text(
+                request.text_label, 
+                fontsize=font_size, 
+                distance=text_wall_depth
+            )
             base = workplane.cutThruAll()
 
         # 6. Export base as step file
@@ -117,7 +121,26 @@ async def generate_base(request: BaseGenerationRequest):
         if os.path.exists(base_step):
             os.remove(base_step)
 
-        return { "status": "success", "order_id": request.order_id, "figurine_height_cm": request.figurine_height, "base_diameter_mm": base_diameter, "base_height_mm": base_height, "text_label": request.text_label, "model_info": { "original_height_mm": model_height, "centered_at_xy": True, "positioned_on_base": True, "merged_into_single_part": True }, "glb_url": f"/download/{glb_output}", "obj_url": f"/download/{obj_output}", "files": { "glb": glb_output, "obj": obj_output } }
+        return {
+            "status": "success",
+            "order_id": request.order_id,
+            "figurine_height_cm": request.figurine_height,
+            "base_diameter_mm": base_diameter,
+            "base_height_mm": base_height,
+            "text_label": request.text_label,
+            "model_info": {
+                "original_height_mm": model_height,
+                "centered_at_xy": True,
+                "positioned_on_base": True,
+                "merged_into_single_part": True
+            },
+            "glb_url": f"/download/{glb_output}",
+            "obj_url": f"/download/{obj_output}",
+            "files": {
+                "glb": glb_output,
+                "obj": obj_output
+            }
+        }
     except requests.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Failed to download model: {str(e)}")
     except Exception as e:
