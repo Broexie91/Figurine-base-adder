@@ -77,15 +77,17 @@ bpy.ops.object.join()
 
 # Optionele tekst
 if text_str.strip():
-    text_loc = (center_x, center_y - radius*0.85, bmin.z + 1.5)
+    # Place text horizontally (flat) on top of the base
+    text_loc = (center_x, center_y - radius*0.75, bmin.z)
     bpy.ops.object.text_add(location=text_loc)
     txt = bpy.context.active_object
     txt.data.body = text_str.upper()[:40]
-    txt.data.size = radius * 0.25
-    txt.data.extrude = 2.0
+    txt.data.size = radius * 0.30
+    txt.data.extrude = 0.5 # Subtly embossed/embedded in the base
     txt.data.align_x = 'CENTER'
-    # Fixed rotation to face forward (was mirrored/backwards)
-    txt.rotation_euler = (math.radians(90), 0, 0)
+    txt.data.align_y = 'CENTER'
+    # Text lies flat facing Z-up
+    txt.rotation_euler = (0, 0, 0)
 
     bpy.ops.object.convert(target='MESH')
     txt_mesh = bpy.context.active_object
