@@ -13,12 +13,10 @@ def test_blender():
     Test of Blender correct aangeroepen kan worden (handig voor debug).
     """
     try:
-        # Probeer Blender versie op te halen (met Xvfb)
-            # Blender aanroepen (headless image heeft geen Xvfb meer nodig)
-        cmd = [
-            "/home/headless/blender/blender", "-b", "--python", "/app/blender_process.py", "--",
-            str(input_glb), str(output_glb), str(size_cm), text
-        ]
+cmd = [
+    "blender", "-b", "--python", "/app/blender_process.py", "--",
+    str(input_glb), str(output_glb), str(size_cm), text
+]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return {
             "returncode": result.returncode,
