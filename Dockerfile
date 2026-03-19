@@ -2,15 +2,18 @@ FROM cadquery/cadquery:latest
 
 WORKDIR /app
 
-# Install additional Python packages needed for the API
-RUN pip install --no-cache-dir \
+# Install Python dependencies via pip
+RUN pip install --no-cache-dir --upgrade \
     fastapi \
-    uvicorn \
+    uvicorn[standard] \
     requests \
     trimesh \
     numpy
 
 COPY . /app
 
+# Expose port 8080
+EXPOSE 8080
+
 # Railway uses port 8080 or the PORT environment variable
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
