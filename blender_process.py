@@ -20,7 +20,7 @@ size_cm = float(argv[2])
 text_str = argv[3] if len(argv) > 3 else ""
 
 desired_height_mm = size_cm * 10
-base_thickness_mm = 8.0
+base_thickness_mm = 4.0
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -55,16 +55,16 @@ bmin, bmax = get_bounds([model])  # helper functie onderaan
 # Maak base
 center_x = (bmin.x + bmax.x) / 2
 center_y = (bmin.y + bmax.y) / 2
-radius = max(bmax.x - bmin.x, bmax.y - bmax.y) / 2 * 1.3
+radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 1.15
 
 bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
                                     location=(center_x, center_y, bmin.z - base_thickness_mm/2))
 base = bpy.context.active_object
 
-# Base kleur (warm grijs)
+# Base kleur (grijs)
 mat = bpy.data.materials.new("BaseMat")
 mat.use_nodes = True
-mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.8, 0.7, 0.6, 1.0)
+mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.3, 0.3, 0.3, 1.0)
 base.data.materials.append(mat)
 
 # Boolean UNION met Manifold (beste kwaliteit voor print)
