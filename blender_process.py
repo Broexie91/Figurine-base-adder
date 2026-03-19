@@ -55,7 +55,8 @@ bmin, bmax = get_bounds([model])  # helper functie onderaan
 # Maak base
 center_x = (bmin.x + bmax.x) / 2
 center_y = (bmin.y + bmax.y) / 2
-radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 1.15
+# Reduce radius drastically so it fits the feet better instead of wide arms
+radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.75
 
 bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
                                     location=(center_x, center_y, bmin.z - base_thickness_mm/2))
