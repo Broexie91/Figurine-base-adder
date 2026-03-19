@@ -55,8 +55,8 @@ bmin, bmax = get_bounds([model])  # helper functie onderaan
 # Maak base
 center_x = (bmin.x + bmax.x) / 2
 center_y = (bmin.y + bmax.y) / 2
-# Reduce radius drastically so it fits the feet better instead of wide arms
-radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.75
+# Make radius 0.95 to fit the feet comfortably
+radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
 bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
                                     location=(center_x, center_y, bmin.z - base_thickness_mm/2))
@@ -84,7 +84,8 @@ if text_str.strip():
     txt.data.size = radius * 0.25
     txt.data.extrude = 2.0
     txt.data.align_x = 'CENTER'
-    txt.rotation_euler = (math.radians(90), 0, math.radians(180))
+    # Fixed rotation to face forward (was mirrored/backwards)
+    txt.rotation_euler = (math.radians(90), 0, 0)
 
     bpy.ops.object.convert(target='MESH')
     txt_mesh = bpy.context.active_object
