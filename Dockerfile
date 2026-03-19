@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     blender \
     xvfb \
+    python3-numpy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
