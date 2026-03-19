@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import httpx
@@ -90,10 +90,15 @@ async def add_base(request: BaseRequest):
 
             print("SUCCESS: output.glb created")
 
-            return FileResponse(
-                path=output_glb,
+            with open(output_glb, "rb") as f:
+                glb_data = f.read()
+
+            return Response(
+                content=glb_data,
                 media_type="model/gltf-binary",
-                filename="figurine_with_base.glb"
+                headers={
+                    "Content-Disposition": 'attachment; filename="figurine_with_base.glb"'
+                }
             )
 
         except subprocess.TimeoutExpired:
