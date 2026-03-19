@@ -102,6 +102,9 @@ if text_str.strip():
     bpy.data.objects.remove(txt_mesh)
 
 # Export gekleurd GLB (klaar voor print)
+bpy.ops.object.select_all(action='DESELECT')
+model.select_set(True)
+
 bpy.ops.export_scene.gltf(
     filepath=output_path,
     export_format='GLB',
