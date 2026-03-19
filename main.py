@@ -14,9 +14,10 @@ def test_blender():
     """
     try:
         # Probeer Blender versie op te halen (met Xvfb)
+            # Blender aanroepen (headless image heeft geen Xvfb meer nodig)
         cmd = [
-            "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
-            "blender", "--version"
+            "/home/headless/blender/blender", "-b", "--python", "/app/blender_process.py", "--",
+            str(input_glb), str(output_glb), str(size_cm), text
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return {
