@@ -48,21 +48,41 @@ async def generate_base(request: BaseGenerationRequest):
         bounds = original_model.bounds
         model_min_z = bounds[0][2]
         model_max_z = bounds[1][2]
-        model_height = model_max_z - model_min_z
+        original_model_height = model_max_z - model_min_z
         model_center_x = (bounds[0][0] + bounds[1][0]) / 2
         model_center_y = (bounds[0][1] + bounds[1][1]) / 2
-        model_width = bounds[1][0] - bounds[0][0]
 
-        # 3. Scale base dimensions based on figurine height
+        # 3. SCALE the model to match the target figurine height
+        # Target height in mm: figurine_height_cm * 10 (e.g., 6cm = 60mm, 8cm = 80mm)
+        target_model_height_mm = request.figurine_height * 10
+        
+        # Calculate scale factor based on original model height
+        if original_model_height > 0:
+            scale_factor = target_model_height_mm / original_model_height
+        else:
+            scale_factor = 1.0
+        
+        # Apply uniform scaling to maintain model quality and proportions
+        original_model.apply_scale(scale_factor)
+        
+        # Recalculate bounds after scaling
+        bounds = original_model.bounds
+        model_min_z = bounds[0][2]
+        model_max_z = bounds[1][2]
+        scaled_model_height = model_max_z - model_min_z
+        model_center_x = (bounds[0][0] + bounds[1][0]) / 2
+        model_center_y = (bounds[0][1] + bounds[1][1]) / 2
+
+        # 4. Scale base dimensions based on figurine height
         base_diameter = 30 + (request.figurine_height - 6) * 5  # 30mm for 6cm, 40mm for 10cm
         base_height = 8 + (request.figurine_height - 6) * 2  # 8mm for 6cm, 16mm for 10cm
         base_radius = base_diameter / 2
 
-        # 4. Create the base with CadQuery
+        # 5. Create the base with CadQuery
         # Create the cylindrical base
         base = cq.Workplane("XY").circle(base_radius).extrude(base_height)
 
-        # 5. Add text on the base (if provided)
+        # 6. Add text on the base (if provided)
         if request.text_label:
             try:
                 # Create a separate text object and engrave it
@@ -85,11 +105,11 @@ async def generate_base(request: BaseGenerationRequest):
                 # If text fails, just continue without text
                 print(f"Warning: Text engraving failed: {str(text_error)}")
 
-        # 6. Export base as step file
+        # 7. Export base as step file
         base_step = f"base_{request.order_id}.step"
         cq.exporters.export(base, base_step)
 
-        # 7. Load base model
+        # 8. Load base model
         base_model = trimesh.load(base_step)
 
         # Get base bounds
@@ -99,7 +119,7 @@ async def generate_base(request: BaseGenerationRequest):
         base_center_x = (base_bounds[0][0] + base_bounds[1][0]) / 2
         base_center_y = (base_bounds[0][1] + base_bounds[1][1]) / 2
 
-        # 8. Position the models correctly
+        # 9. Position the models correctly
         # Move base so its top surface is at Z=0, centered at XY origin
         base_offset = np.array([ -base_center_x, -base_center_y, -base_max_z ])
         base_model.apply_translation(base_offset)
@@ -108,7 +128,7 @@ async def generate_base(request: BaseGenerationRequest):
         model_offset = np.array([ -model_center_x, -model_center_y, -model_min_z ])
         original_model.apply_translation(model_offset)
 
-        # 9. MERGE models into ONE solid part using boolean union
+        # 10. MERGE models into ONE solid part using boolean union
         try:
             # Use trimesh boolean operation to merge the two models
             merged_model = trimesh.boolean.union([base_model, original_model])
@@ -117,7 +137,7 @@ async def generate_base(request: BaseGenerationRequest):
             print(f"Warning: Boolean union failed, using scene instead: {str(e)}")
             merged_model = trimesh.Scene([base_model, original_model])
 
-        # 10. Export merged files
+        # 11. Export merged files
         glb_output = f"final_{request.order_id}.glb"
         obj_output = f"final_{request.order_id}.obj"
         merged_model.export(glb_output)
@@ -133,11 +153,14 @@ async def generate_base(request: BaseGenerationRequest):
             "status": "success",
             "order_id": request.order_id,
             "figurine_height_cm": request.figurine_height,
+            "scale_factor": round(scale_factor, 3),
+            "original_model_height_mm": round(original_model_height, 2),
+            "target_model_height_mm": target_model_height_mm,
+            "scaled_model_height_mm": round(scaled_model_height, 2),
             "base_diameter_mm": base_diameter,
             "base_height_mm": base_height,
             "text_label": request.text_label,
             "model_info": {
-                "original_height_mm": model_height,
                 "centered_at_xy": True,
                 "positioned_on_base": True,
                 "merged_into_single_part": True
