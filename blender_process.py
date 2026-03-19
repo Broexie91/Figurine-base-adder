@@ -20,7 +20,7 @@ size_cm = float(argv[2])
 text_str = argv[3] if len(argv) > 3 else ""
 
 desired_height_mm = size_cm * 10
-base_thickness_mm = 4.0
+base_thickness_mm = 2.0
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -67,14 +67,12 @@ mat.use_nodes = True
 mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.3, 0.3, 0.3, 1.0)
 base.data.materials.append(mat)
 
-# Boolean UNION met Manifold (beste kwaliteit voor print)
-mod = model.modifiers.new("UnionBase", 'BOOLEAN')
-mod.operation = 'UNION'
-mod.solver = 'EXACT'
-mod.object = base
+# Join base to model (prevents material bleeding on bad AI topology)
+bpy.ops.object.select_all(action='DESELECT')
+model.select_set(True)
+base.select_set(True)
 bpy.context.view_layer.objects.active = model
-bpy.ops.object.modifier_apply(modifier=mod.name)
-bpy.data.objects.remove(base)
+bpy.ops.object.join()
 
 # Optionele tekst
 if text_str.strip():
@@ -94,12 +92,11 @@ if text_str.strip():
     tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
     txt_mesh.data.materials.append(tmat)
 
-    mod2 = model.modifiers.new("UnionText", 'BOOLEAN')
-    mod2.operation = 'UNION'
-    mod2.solver = 'EXACT'
-    mod2.object = txt_mesh
-    bpy.ops.object.modifier_apply(modifier=mod2.name)
-    bpy.data.objects.remove(txt_mesh)
+    bpy.ops.object.select_all(action='DESELECT')
+    model.select_set(True)
+    txt_mesh.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.join()
 
 # Export gekleurd GLB (klaar voor print)
 bpy.ops.object.select_all(action='DESELECT')
