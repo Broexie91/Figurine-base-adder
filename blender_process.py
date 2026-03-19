@@ -70,7 +70,7 @@ base.data.materials.append(mat)
 # Boolean UNION met Manifold (beste kwaliteit voor print)
 mod = model.modifiers.new("UnionBase", 'BOOLEAN')
 mod.operation = 'UNION'
-mod.solver = 'MANIFOLD' if hasattr(bpy.types.Modifier, 'solver') else 'FAST'
+mod.solver = 'EXACT'
 mod.object = base
 bpy.context.view_layer.objects.active = model
 bpy.ops.object.modifier_apply(modifier=mod.name)
@@ -96,7 +96,7 @@ if text_str.strip():
 
     mod2 = model.modifiers.new("UnionText", 'BOOLEAN')
     mod2.operation = 'UNION'
-    mod2.solver = 'MANIFOLD'
+    mod2.solver = 'EXACT'
     mod2.object = txt_mesh
     bpy.ops.object.modifier_apply(modifier=mod2.name)
     bpy.data.objects.remove(txt_mesh)
