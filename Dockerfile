@@ -1,17 +1,14 @@
-FROM condaforge/miniforge3:latest
+FROM cadquery/cadquery:latest
 
 WORKDIR /app
 
-# Install cadquery and all dependencies including cascadio
-RUN mamba install -y -c conda-forge \
-    cadquery \
-    pyocc \
-    trimesh \
+# Install additional Python packages needed for the API
+RUN pip install --no-cache-dir \
     fastapi \
     uvicorn \
     requests \
-    numpy && \
-    mamba clean --all --yes
+    trimesh \
+    numpy
 
 COPY . /app
 
