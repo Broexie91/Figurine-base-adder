@@ -128,6 +128,16 @@ if text_str.strip():
     bpy.context.view_layer.objects.active = model
     bpy.ops.object.join()
 
+# Extract all embedded textures from memory to the output directory!
+import os
+out_dir = os.path.dirname(output_path)
+for img in bpy.data.images:
+    if img.has_data and img.name != 'Render Result':
+        img_safe_name = img.name.replace(" ", "_").replace("/", "_") + ".png"
+        img.filepath_raw = os.path.join(out_dir, img_safe_name)
+        img.file_format = 'PNG'
+        img.save()
+
 # Export gekleurd OBJ archief (klaar voor print via Shapeways)
 bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
@@ -136,7 +146,7 @@ bpy.ops.wm.obj_export(
     filepath=output_path,
     export_selected_objects=True,
     export_materials=True,
-    path_mode='COPY'
+    path_mode='STRIP'
 )
 
 print("SUCCESS: Exported", output_path)
