@@ -128,25 +128,22 @@ if text_str.strip():
     bpy.context.view_layer.objects.active = model
     bpy.ops.object.join()
 
-# Extract all embedded textures from memory to the output directory!
+# Extract extremely robustly by saving temporary blend file and unpacking
 import os
 out_dir = os.path.dirname(output_path)
-for img in bpy.data.images:
-    if img.has_data and img.name != 'Render Result':
-        img_safe_name = img.name.replace(" ", "_").replace("/", "_") + ".png"
-        img.filepath_raw = os.path.join(out_dir, img_safe_name)
-        img.file_format = 'PNG'
-        img.save()
+bpy.ops.wm.save_as_mainfile(filepath=os.path.join(out_dir, "temp.blend"))
+bpy.ops.file.unpack_all(method='USE_LOCAL')
 
 # Export gekleurd OBJ archief (klaar voor print via Shapeways)
 bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
 
+# using path_mode COPY takes the unpacked textures and perfectly flattens them next to the OBJ
 bpy.ops.wm.obj_export(
     filepath=output_path,
     export_selected_objects=True,
     export_materials=True,
-    path_mode='STRIP'
+    path_mode='COPY'
 )
 
 print("SUCCESS: Exported", output_path)

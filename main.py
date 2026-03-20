@@ -95,10 +95,10 @@ async def add_base(request: BaseRequest):
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for file_path in tmp_path.rglob("*"):
-                    if file_path.name != "input.glb" and file_path.is_file():
-                        arcname = file_path.relative_to(tmp_path)
-                        zipf.write(file_path, arcname=str(arcname))
+                # Zip only the flat root files to avoid duplicating the /textures subfolder
+                for file_path in tmp_path.iterdir():
+                    if file_path.is_file() and file_path.suffix not in ['.glb', '.blend']:
+                        zipf.write(file_path, arcname=file_path.name)
 
             zip_buffer.seek(0)
             zip_data = zip_buffer.read()
