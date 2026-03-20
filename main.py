@@ -33,16 +33,20 @@ class BaseRequest(BaseModel):
     model_url: str
     size_cm: int
     text: str = ""
+    format: str = "zip"  # 'glb', 'zip', 'obj'
 
 @app.post("/add-base")
 async def add_base(request: BaseRequest):
     if request.size_cm not in [6, 8, 10]:
         raise HTTPException(status_code=400, detail="size_cm moet 6, 8 of 10 zijn")
+    if request.format.lower() not in ["glb", "zip", "obj"]:
+        raise HTTPException(status_code=400, detail="format moet 'glb', 'zip' of 'obj' zijn")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         input_glb = tmp_path / "input.glb"
-        output_obj = tmp_path / "output.obj"
+        is_glb = request.format.lower() == "glb"
+        output_file = tmp_path / ("output.glb" if is_glb else "output.obj")
 
         # Download model file from URL
         try:
@@ -64,7 +68,7 @@ async def add_base(request: BaseRequest):
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
-            str(input_glb), str(output_obj), str(request.size_cm), request.text
+            str(input_glb), str(output_file), str(request.size_cm), request.text
         ]
 
         try:
@@ -83,33 +87,47 @@ async def add_base(request: BaseRequest):
             print(result.stderr)
             print(f"Return code: {result.returncode}")
 
-            if result.returncode != 0 or not output_obj.exists():
+            if result.returncode != 0 or not output_file.exists():
                 error_msg = result.stderr.strip() or "Geen output bestand aangemaakt"
                 print(f"Blender processing failed: {error_msg}")
                 raise HTTPException(status_code=500, detail=f"Verwerking mislukt: {error_msg}")
 
-            print("SUCCESS: output.obj created")
+            print(f"SUCCESS: {output_file.name} created")
 
-            import zipfile
-            import io
+            if is_glb:
+                with open(output_file, "rb") as f:
+                    file_data = f.read()
+                return Response(
+                    content=file_data,
+                    media_type="model/gltf-binary",
+                    headers={"Content-Disposition": 'attachment; filename="figurine_with_base.glb"'}
+                )
+            elif request.format.lower() == "obj":
+                with open(output_file, "rb") as f:
+                    file_data = f.read()
+                return Response(
+                    content=file_data,
+                    media_type="text/plain",
+                    headers={"Content-Disposition": 'attachment; filename="figurine_with_base.obj"'}
+                )
+            else:
+                import zipfile
+                import io
 
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-                # Zip only the flat root files to avoid duplicating the /textures subfolder
-                for file_path in tmp_path.iterdir():
-                    if file_path.is_file() and file_path.suffix not in ['.glb', '.blend']:
-                        zipf.write(file_path, arcname=file_path.name)
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in tmp_path.iterdir():
+                        if file_path.is_file() and file_path.suffix not in ['.glb', '.blend']:
+                            zipf.write(file_path, arcname=file_path.name)
 
-            zip_buffer.seek(0)
-            zip_data = zip_buffer.read()
+                zip_buffer.seek(0)
+                zip_data = zip_buffer.read()
 
-            return Response(
-                content=zip_data,
-                media_type="application/zip",
-                headers={
-                    "Content-Disposition": 'attachment; filename="figurine_with_base.zip"'
-                }
-            )
+                return Response(
+                    content=zip_data,
+                    media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="figurine_with_base.zip"'}
+                )
 
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=500, detail="Verwerking timeout (te lang bezig)")
