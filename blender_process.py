@@ -31,6 +31,8 @@ input_path = argv[0]
 output_path = argv[1]
 size_cm = float(argv[2])
 text_str = argv[3] if len(argv) > 3 else ""
+add_base = argv[4].lower() == 'true' if len(argv) > 4 else True
+add_keychain = argv[5].lower() == 'true' if len(argv) > 5 else False
 
 desired_height_mm = size_cm * 10
 base_thickness_mm = 2.0
@@ -67,64 +69,104 @@ bmin, bmax = get_bounds([model])
 
 fmin, fmax = get_feet_bounds(model, z_threshold_mm=5.0)
 
-# Maak base (berekend op basis van alleen de voeten!)
+# Calculate centers regardless, so keychain can use them
 if fmin and fmax:
     center_x = (fmin.x + fmax.x) / 2
     center_y = (fmin.y + fmax.y) / 2
-    # Hug the footprint perfectly with a 1.35x padding multiplier
     radius = max(fmax.x - fmin.x, fmax.y - fmin.y) / 2 * 1.35
 else:
     center_x = (bmin.x + bmax.x) / 2
     center_y = (bmin.y + bmax.y) / 2
     radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
-bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
-                                    location=(center_x, center_y, bmin.z - base_thickness_mm/2))
-base = bpy.context.active_object
+if add_base:
+    bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
+                                        location=(center_x, center_y, bmin.z - base_thickness_mm/2))
+    base = bpy.context.active_object
 
-# Base kleur (grijs)
-mat = bpy.data.materials.new("BaseMat")
-mat.use_nodes = True
-mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.3, 0.3, 0.3, 1.0)
-base.data.materials.append(mat)
+    # Base kleur (grijs)
+    mat = bpy.data.materials.new("BaseMat")
+    mat.use_nodes = True
+    mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.3, 0.3, 0.3, 1.0)
+    base.data.materials.append(mat)
 
-# Join base to model (prevents material bleeding on bad AI topology)
-bpy.ops.object.select_all(action='DESELECT')
-model.select_set(True)
-base.select_set(True)
-bpy.context.view_layer.objects.active = model
-bpy.ops.object.join()
+    # Join base to model (prevents material bleeding on bad AI topology)
+    bpy.ops.object.select_all(action='DESELECT')
+    model.select_set(True)
+    base.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.join()
 
-# Optionele tekst
-if text_str.strip():
-    # Place text horizontally (flat) on top of the base
-    text_loc = (center_x, center_y - radius*0.65, bmin.z)
-    bpy.ops.object.text_add(location=text_loc)
-    txt = bpy.context.active_object
-    txt.data.body = text_str.upper()[:40]
-    txt.data.size = radius * 0.25 # Lower default size
-    txt.data.extrude = 0.5 # Subtly embossed/embedded in the base
-    txt.data.align_x = 'CENTER'
-    txt.data.align_y = 'CENTER'
-    # Text lies flat facing Z-up
-    txt.rotation_euler = (0, 0, 0)
+    # Optionele tekst
+    if text_str.strip():
+        # Place text horizontally (flat) on top of the base
+        text_loc = (center_x, center_y - radius*0.65, bmin.z)
+        bpy.ops.object.text_add(location=text_loc)
+        txt = bpy.context.active_object
+        txt.data.body = text_str.upper()[:40]
+        txt.data.size = radius * 0.25 # Lower default size
+        txt.data.extrude = 0.5 # Subtly embossed/embedded in the base
+        txt.data.align_x = 'CENTER'
+        txt.data.align_y = 'CENTER'
+        # Text lies flat facing Z-up
+        txt.rotation_euler = (0, 0, 0)
 
-    # Automatically shrink font size if text is wider than safe margins!
-    bpy.context.view_layer.update()
-    max_text_width = radius * 1.4
-    if txt.dimensions.x > max_text_width:
-        txt.data.size *= (max_text_width / txt.dimensions.x)
+        # Automatically shrink font size if text is wider than safe margins!
+        bpy.context.view_layer.update()
+        max_text_width = radius * 1.4
+        if txt.dimensions.x > max_text_width:
+            txt.data.size *= (max_text_width / txt.dimensions.x)
 
-    bpy.ops.object.convert(target='MESH')
-    txt_mesh = bpy.context.active_object
-    tmat = bpy.data.materials.new("TextMat")
+        bpy.ops.object.convert(target='MESH')
+        txt_mesh = bpy.context.active_object
+        tmat = bpy.data.materials.new("TextMat")
+        tmat.use_nodes = True
+        tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
+        txt_mesh.data.materials.append(tmat)
+
+        bpy.ops.object.select_all(action='DESELECT')
+        model.select_set(True)
+        txt_mesh.select_set(True)
+        bpy.context.view_layer.objects.active = model
+        bpy.ops.object.join()
+
+if add_keychain:
+    highest_v = None
+    max_z = -float('inf')
+    mesh = model.data
+    verts_world = [model.matrix_world @ v.co for v in mesh.vertices]
+    for v in verts_world:
+        if math.hypot(v.x - center_x, v.y - center_y) < 15.0:
+            if v.z > max_z:
+                max_z = v.z
+                highest_v = v
+                
+    if highest_v is None:
+        keychain_z = bmax.z
+        keychain_x = center_x
+        keychain_y = center_y
+    else:
+        keychain_z = highest_v.z
+        keychain_x = highest_v.x
+        keychain_y = highest_v.y
+
+    # Add a fat sturdy torus at the top of the head
+    bpy.ops.mesh.primitive_torus_add(
+        major_radius=2.5, 
+        minor_radius=0.7, 
+        location=(keychain_x, keychain_y, keychain_z - 0.5), # Sink 0.5mm into head
+        rotation=(math.radians(90), 0, 0)
+    )
+    torus = bpy.context.active_object
+    
+    tmat = bpy.data.materials.new("RingMat")
     tmat.use_nodes = True
-    tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
-    txt_mesh.data.materials.append(tmat)
+    tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.5, 0.5, 0.5, 1.0)
+    torus.data.materials.append(tmat)
 
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
-    txt_mesh.select_set(True)
+    torus.select_set(True)
     bpy.context.view_layer.objects.active = model
     bpy.ops.object.join()
 

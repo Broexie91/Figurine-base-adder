@@ -33,6 +33,8 @@ class BaseRequest(BaseModel):
     model_url: str
     size_cm: int
     text: str = ""
+    add_base: bool = True
+    add_keychain: bool = False
 
 @app.post("/add-base")
 async def add_base(request: BaseRequest):
@@ -64,7 +66,8 @@ async def add_base(request: BaseRequest):
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
-            str(input_glb), str(output_obj), str(request.size_cm), request.text
+            str(input_glb), str(output_obj), str(request.size_cm), request.text,
+            str(request.add_base), str(request.add_keychain)
         ]
 
         try:
