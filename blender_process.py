@@ -128,15 +128,15 @@ if text_str.strip():
     bpy.context.view_layer.objects.active = model
     bpy.ops.object.join()
 
-# Export gekleurd GLB (klaar voor print)
+# Export gekleurd OBJ archief (klaar voor print via Shapeways)
 bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
 
-bpy.ops.export_scene.gltf(
+bpy.ops.wm.obj_export(
     filepath=output_path,
-    export_format='GLB',
-    export_materials='EXPORT',
-    use_selection=True
+    export_selected_objects=True,
+    export_materials=True,
+    path_mode='COPY'
 )
 
 print("SUCCESS: Exported", output_path)

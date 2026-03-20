@@ -42,7 +42,7 @@ async def add_base(request: BaseRequest):
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         input_glb = tmp_path / "input.glb"
-        output_glb = tmp_path / "output.glb"
+        output_obj = tmp_path / "output.obj"
 
         # Download model file from URL
         try:
@@ -64,7 +64,7 @@ async def add_base(request: BaseRequest):
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
-            str(input_glb), str(output_glb), str(request.size_cm), request.text
+            str(input_glb), str(output_obj), str(request.size_cm), request.text
         ]
 
         try:
@@ -83,21 +83,31 @@ async def add_base(request: BaseRequest):
             print(result.stderr)
             print(f"Return code: {result.returncode}")
 
-            if result.returncode != 0 or not output_glb.exists():
+            if result.returncode != 0 or not output_obj.exists():
                 error_msg = result.stderr.strip() or "Geen output bestand aangemaakt"
                 print(f"Blender processing failed: {error_msg}")
                 raise HTTPException(status_code=500, detail=f"Verwerking mislukt: {error_msg}")
 
-            print("SUCCESS: output.glb created")
+            print("SUCCESS: output.obj created")
 
-            with open(output_glb, "rb") as f:
-                glb_data = f.read()
+            import zipfile
+            import io
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in tmp_path.rglob("*"):
+                    if file_path.name != "input.glb" and file_path.is_file():
+                        arcname = file_path.relative_to(tmp_path)
+                        zipf.write(file_path, arcname=str(arcname))
+
+            zip_buffer.seek(0)
+            zip_data = zip_buffer.read()
 
             return Response(
-                content=glb_data,
-                media_type="model/gltf-binary",
+                content=zip_data,
+                media_type="application/zip",
                 headers={
-                    "Content-Disposition": 'attachment; filename="figurine_with_base.glb"'
+                    "Content-Disposition": 'attachment; filename="figurine_with_base.zip"'
                 }
             )
 
