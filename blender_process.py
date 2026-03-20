@@ -98,16 +98,22 @@ bpy.ops.object.join()
 # Optionele tekst
 if text_str.strip():
     # Place text horizontally (flat) on top of the base
-    text_loc = (center_x, center_y - radius*0.80, bmin.z)
+    text_loc = (center_x, center_y - radius*0.65, bmin.z)
     bpy.ops.object.text_add(location=text_loc)
     txt = bpy.context.active_object
     txt.data.body = text_str.upper()[:40]
-    txt.data.size = radius * 0.35
+    txt.data.size = radius * 0.25 # Lower default size
     txt.data.extrude = 0.5 # Subtly embossed/embedded in the base
     txt.data.align_x = 'CENTER'
     txt.data.align_y = 'CENTER'
     # Text lies flat facing Z-up
     txt.rotation_euler = (0, 0, 0)
+
+    # Automatically shrink font size if text is wider than safe margins!
+    bpy.context.view_layer.update()
+    max_text_width = radius * 1.4
+    if txt.dimensions.x > max_text_width:
+        txt.data.size *= (max_text_width / txt.dimensions.x)
 
     bpy.ops.object.convert(target='MESH')
     txt_mesh = bpy.context.active_object
