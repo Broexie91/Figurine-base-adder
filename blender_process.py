@@ -134,14 +134,16 @@ if add_base:
 
 if add_keychain:
     highest_v = None
+    highest_v_idx = None
     max_z = -float('inf')
     mesh = model.data
     verts_world = [model.matrix_world @ v.co for v in mesh.vertices]
-    for v in verts_world:
+    for i, v in enumerate(verts_world):
         if math.hypot(v.x - center_x, v.y - center_y) < 15.0:
             if v.z > max_z:
                 max_z = v.z
                 highest_v = v
+                highest_v_idx = i
                 
     if highest_v is None:
         keychain_z = bmax.z
@@ -151,6 +153,32 @@ if add_keychain:
         keychain_z = highest_v.z
         keychain_x = highest_v.x
         keychain_y = highest_v.y
+
+    # Haal de kleur van de hoogste vertex (meestal het haar) uit de texture
+    torus_color = (0.5, 0.5, 0.5, 1.0)
+    if highest_v_idx is not None and model.data.uv_layers.active and len(model.data.materials) > 0:
+        try:
+            uv = None
+            for loop in model.data.loops:
+                if loop.vertex_index == highest_v_idx:
+                    uv = model.data.uv_layers.active.data[loop.index].uv
+                    break
+            
+            if uv:
+                mat = model.data.materials[0]
+                if mat and mat.use_nodes:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE' and node.image:
+                            img = node.image
+                            w, h = img.size
+                            x = max(0, min(w - 1, int((uv.x % 1.0) * w)))
+                            y = max(0, min(h - 1, int((uv.y % 1.0) * h)))
+                            idx = (y * w + x) * 4
+                            if idx + 3 < len(img.pixels):
+                                torus_color = tuple(img.pixels[idx:idx+4])
+                            break
+        except Exception:
+            pass
 
     # Vergroot de torus zodat de binnendiameter ruim groot genoeg is voor een standaard sleutelhanger
     bpy.ops.mesh.primitive_torus_add(
@@ -163,7 +191,7 @@ if add_keychain:
     
     tmat = bpy.data.materials.new("RingMat")
     tmat.use_nodes = True
-    tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.5, 0.5, 0.5, 1.0)
+    tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = torus_color
     torus.data.materials.append(tmat)
 
     bpy.ops.object.select_all(action='DESELECT')
