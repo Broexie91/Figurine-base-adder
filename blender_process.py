@@ -31,6 +31,8 @@ input_path = argv[0]
 output_path = argv[1]
 size_cm = float(argv[2])
 text_str = argv[3] if len(argv) > 3 else ""
+if text_str == "--NO-TEXT--":
+    text_str = ""
 add_base = argv[4].lower() == 'true' if len(argv) > 4 else True
 add_keychain = argv[5].lower() == 'true' if len(argv) > 5 else False
 
@@ -150,11 +152,11 @@ if add_keychain:
         keychain_x = highest_v.x
         keychain_y = highest_v.y
 
-    # Add a fat sturdy torus at the top of the head
+    # Vergroot de torus zodat de binnendiameter ruim groot genoeg is voor een standaard sleutelhanger
     bpy.ops.mesh.primitive_torus_add(
-        major_radius=2.5, 
-        minor_radius=0.7, 
-        location=(keychain_x, keychain_y, keychain_z - 0.5), # Sink 0.5mm into head
+        major_radius=4.0,   # Grotere ring, diameter is nu een stuk groter
+        minor_radius=1.2,   # Stevige dikte voor robuustheid (binnenradius = 2.8mm, dus 5.6mm diameter gat)
+        location=(keychain_x, keychain_y, keychain_z - 1.0), # Laat iets verder de head in zakken (1.0mm)
         rotation=(math.radians(90), 0, 0)
     )
     torus = bpy.context.active_object

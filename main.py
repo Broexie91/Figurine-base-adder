@@ -62,11 +62,13 @@ async def add_base(request: BaseRequest):
         print(f"Input file downloaded, size: {len(content)} bytes")
         print(f"Parameters: size_cm={request.size_cm}, text='{request.text}'")
 
+        text_arg = request.text if request.text.strip() else "--NO-TEXT--"
+
         # Blender aanroepen met Xvfb (virtueel display)
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
-            str(input_glb), str(output_obj), str(request.size_cm), request.text,
+            str(input_glb), str(output_obj), str(request.size_cm), text_arg,
             str(request.add_base), str(request.add_keychain)
         ]
 
