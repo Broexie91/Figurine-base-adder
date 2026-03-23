@@ -71,15 +71,6 @@ for obj in mesh_objs:
 bpy.ops.object.join()
 model = bpy.context.active_object
 
-# Fix inverted or flipped normals which cause 'holes' in 3D printing
-if model.data.has_custom_normals:
-    bpy.ops.mesh.customdata_custom_splitnormals_clear()
-
-bpy.ops.object.mode_set(mode='EDIT')
-bpy.ops.mesh.select_all(action='SELECT')
-bpy.ops.mesh.normals_make_consistent(inside=False)
-bpy.ops.object.mode_set(mode='OBJECT')
-
 # Scale naar exacte hoogte
 bmin = Vector((float('inf'),)*3)
 bmax = Vector((-float('inf'),)*3)
