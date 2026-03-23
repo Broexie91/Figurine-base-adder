@@ -93,6 +93,15 @@ scale_factor = desired_height_mm / current_height
 model.scale *= scale_factor
 bpy.ops.object.transform_apply(scale=True)
 
+# Gelijk na het opschalen voegen we een min. dikte toe van 1.0mm
+# Dit voorkomt dat brillen, haren en kledingstukken "verdwijnen" in 3D-print slicers zoals Marketiger.
+# 'NON_MANIFOLD' is extreem goed in het oplossen van intersecting AI meshes.
+mod = model.modifiers.new(name="MakeSolid", type='SOLIDIFY')
+mod.solidify_mode = 'NON_MANIFOLD'
+mod.thickness = 1.0
+mod.offset = 0.0
+bpy.ops.object.modifier_apply(modifier="MakeSolid")
+
 # Herbereken bounds
 bmin, bmax = get_bounds([model])
 
