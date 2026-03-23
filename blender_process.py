@@ -1,7 +1,11 @@
 import bpy
 import sys
 import math
+import addon_utils
 from mathutils import Vector
+
+# Zorg dat de 3D Print Toolbox addon is geactiveerd
+addon_utils.enable("object_print3d_utils")
 
 def get_bounds(objs):
     bmin = Vector((float('inf'),)*3)
@@ -83,6 +87,19 @@ current_height = bmax.z - bmin.z
 scale_factor = desired_height_mm / current_height
 model.scale *= scale_factor
 bpy.ops.object.transform_apply(scale=True)
+
+# ---> NIEUW: 3D Print Toolbox Cleanup <---
+# Nu we weten dat 1 Blender unit = 1 mm is, schonen we de mesh op.
+bpy.ops.object.mode_set(mode='EDIT')
+bpy.ops.mesh.select_all(action='SELECT')
+# 1. Merge bij elkaar liggende vertices (0.01mm) om van 300 losse shells één geheel te maken waar dat past
+bpy.ops.mesh.remove_doubles(threshold=0.01)
+# 2. Gebruik de gouden 3D Print Toolbox functie om gaten (holes) manifold te maken
+try:
+    bpy.ops.mesh.print3d_clean_non_manifold()
+except Exception as e:
+    print("3D Print Toolbox cleanup failed (mogelijk is model al manifold):", e)
+bpy.ops.object.mode_set(mode='OBJECT')
 
 # Gelijk na het opschalen voegen we een min. dikte toe van 1.0mm
 # We gebruiken de standaard 'Simple' algoritme (EXTRUDE), omdat
