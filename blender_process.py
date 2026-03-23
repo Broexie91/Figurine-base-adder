@@ -88,42 +88,11 @@ scale_factor = desired_height_mm / current_height
 model.scale *= scale_factor
 bpy.ops.object.transform_apply(scale=True)
 
-# ---> NIEUW: 3D Print Toolbox Cleanup & Verdikken <---
-# EERST: Splits alle originele (ongewijzigde) losse onderdelen op!
-# Hierdoor scheiden we de 2D vlakken zoals de zonnebril af van de vaste core.
+# ---> NIEUW: 3D Print Toolbox Cleanup <---
+# Nu we robuuste gebundelde mesh hebben, versmelten we alles met de 3D Print Toolbox.
 bpy.ops.object.mode_set(mode='EDIT')
 bpy.ops.mesh.select_all(action='SELECT')
-bpy.ops.mesh.separate(type='LOOSE')
-bpy.ops.object.mode_set(mode='OBJECT')
-
-parts = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-parts.sort(key=lambda o: len(o.data.vertices), reverse=True)
-if len(parts) > 0:
-    max_verts = len(parts[0].data.vertices)
-    
-    # Filter op dunne/kleine zwevende accessoires (minder dan 50% vd body)
-    for p in parts:
-        if len(p.data.vertices) < (max_verts * 0.5):
-            bpy.context.view_layer.objects.active = p
-            mod = p.modifiers.new(name="MakeSolid", type='SOLIDIFY')
-            mod.thickness = 1.0
-            mod.offset = 0.0 # Zwelt 0.5mm naar binnen / 0.5mm naar buiten (gegarandeerde 1mm muurdikte voor dunne bril/details)
-            bpy.ops.object.modifier_apply(modifier="MakeSolid")
-            
-    # Join de nu VEILIG dik gemaakte accessoires terug aan de body
-    bpy.ops.object.select_all(action='DESELECT')
-    for p in parts:
-        p.select_set(True)
-    
-    bpy.context.view_layer.objects.active = parts[0]
-    bpy.ops.object.join()
-    model = bpy.context.active_object
-
-# DAN PAS: LASSEN EN REPAREREN
-# Nu we robuuste dikke blokken hebben, versmelten we ze met de main body
-bpy.ops.object.mode_set(mode='EDIT')
-bpy.ops.mesh.select_all(action='SELECT')
-# 1. Merge bij elkaar liggende vertices (0.01mm) om de dikke bril aan het gezicht vast te lassen
+# 1. Merge bij elkaar liggende vertices (0.01mm) om van 300 losse shells één geheel te maken
 bpy.ops.mesh.remove_doubles(threshold=0.01)
 # 2. Gebruik de gouden 3D Print Toolbox functie om resterende intersecties en gaten (holes) netjes dicht te ritsen
 try:
