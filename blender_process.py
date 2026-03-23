@@ -156,6 +156,7 @@ if add_keychain:
 
     # Haal de kleur van de hoogste vertex (meestal het haar) uit de texture
     torus_color = (0.5, 0.5, 0.5, 1.0)
+    found_uv = None
     if highest_v_idx is not None and model.data.uv_layers.active and len(model.data.materials) > 0:
         try:
             uv = None
@@ -165,6 +166,7 @@ if add_keychain:
                     break
             
             if uv:
+                found_uv = uv
                 mat = model.data.materials[0]
                 if mat and mat.use_nodes:
                     for node in mat.node_tree.nodes:
@@ -185,14 +187,21 @@ if add_keychain:
         major_radius=4.0,   # Grotere ring, diameter is nu een stuk groter
         minor_radius=1.2,   # Stevige dikte voor robuustheid (binnenradius = 2.8mm, dus 5.6mm diameter gat)
         location=(keychain_x, keychain_y, keychain_z - 1.0), # Laat iets verder de head in zakken (1.0mm)
-        rotation=(math.radians(90), 0, 0)
+        rotation=(math.radians(90), 0, 0),
+        generate_uvs=True
     )
     torus = bpy.context.active_object
     
-    tmat = bpy.data.materials.new("RingMat")
-    tmat.use_nodes = True
-    tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = torus_color
-    torus.data.materials.append(tmat)
+    if found_uv is not None and len(model.data.materials) > 0:
+        torus.data.materials.append(model.data.materials[0])
+        if torus.data.uv_layers.active:
+            for loop in torus.data.loops:
+                torus.data.uv_layers.active.data[loop.index].uv = found_uv
+    else:
+        tmat = bpy.data.materials.new("RingMat")
+        tmat.use_nodes = True
+        tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = torus_color
+        torus.data.materials.append(tmat)
 
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
