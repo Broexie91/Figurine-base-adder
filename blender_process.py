@@ -106,7 +106,7 @@ bpy.ops.object.mode_set(mode='OBJECT')
 # NON_MANIFOLD mode de ingewikkelde AI mesh compleet verwoestte (het werd onzichtbaar!).
 mod = model.modifiers.new(name="MakeSolid", type='SOLIDIFY')
 mod.thickness = 1.0
-mod.offset = 0.0
+mod.offset = -1.0  # -1.0 betekent dat de dikte naar de BINNENKANT van het model groeit, zodat het model niet visueel dikker of 'fat' wordt!
 bpy.ops.object.modifier_apply(modifier="MakeSolid")
 
 # Herbereken bounds
