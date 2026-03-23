@@ -45,6 +45,24 @@ bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=input_path)
 
 mesh_objs = [o for o in bpy.data.objects if o.type == 'MESH']
+
+for mat in bpy.data.materials:
+    mat.blend_method = 'OPAQUE'
+    mat.shadow_method = 'OPAQUE'
+    if mat.use_nodes:
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            for input_name in ['Alpha', 'Transmission Weight', 'Transmission']:
+                if input_name in bsdf.inputs:
+                    inp = bsdf.inputs[input_name]
+                    if inp.is_linked:
+                        for link in inp.links:
+                            mat.node_tree.links.remove(link)
+                    if 'Alpha' in input_name:
+                        inp.default_value = 1.0
+                    else:
+                        inp.default_value = 0.0
+
 for obj in mesh_objs:
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
