@@ -229,11 +229,23 @@ if add_keychain:
 
 # Extract extremely robustly by saving temporary blend file and unpacking
 import os
+import numpy as np
 out_dir = os.path.dirname(output_path)
 bpy.ops.wm.save_as_mainfile(filepath=os.path.join(out_dir, "temp.blend"))
 bpy.ops.file.unpack_all(method='USE_LOCAL')
 
-# Export gekleurd OBJ archief (klaar voor print via Shapeways)
+# Now the images are unpacked to disk. We overwrite them to completely remove 
+# any alpha channel so 3D printing platforms don't see them as holes!
+for img in bpy.data.images:
+    if img.source == 'FILE' and img.type == 'IMAGE' and img.filepath:
+        if len(img.pixels) > 0 and img.channels == 4:
+            pixels = np.empty(len(img.pixels), dtype=np.float32)
+            img.pixels.foreach_get(pixels)
+            pixels[3::4] = 1.0  # Set all Alpha values to 1.0
+            img.pixels.foreach_set(pixels)
+            img.save()
+
+# Export gekleurd OBJ archief (klaar voor print via Shapeways/Marketiger)
 bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
 
