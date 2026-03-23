@@ -99,7 +99,33 @@ try:
     bpy.ops.mesh.print3d_clean_non_manifold()
 except Exception as e:
     print("3D Print Toolbox cleanup failed (mogelijk is model al manifold):", e)
+
+# 3. Splits alle overgebleven losse onderdelen (brillen, haren) op!
+bpy.ops.mesh.separate(type='LOOSE')
 bpy.ops.object.mode_set(mode='OBJECT')
+
+parts = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+parts.sort(key=lambda o: len(o.data.vertices), reverse=True)
+if len(parts) > 0:
+    max_verts = len(parts[0].data.vertices)
+    
+    # 4. Filter op dunne/kleine zwevende accessoires (minder dan 50% vd totale body massa/vertices)
+    for p in parts:
+        if len(p.data.vertices) < (max_verts * 0.5):
+            bpy.context.view_layer.objects.active = p
+            mod = p.modifiers.new(name="MakeSolid", type='SOLIDIFY')
+            mod.thickness = 1.0
+            mod.offset = 0.0 # Zwelt 0.5mm naar binnen / 0.5mm naar buiten (gegarandeerde 1mm muurdikte voor de 3D printer)
+            bpy.ops.object.modifier_apply(modifier="MakeSolid")
+            
+    # 5. Join alles weer samen tot het originele model
+    bpy.ops.object.select_all(action='DESELECT')
+    for p in parts:
+        p.select_set(True)
+    
+    bpy.context.view_layer.objects.active = parts[0]
+    bpy.ops.object.join()
+    model = bpy.context.active_object
 
 # Herbereken bounds
 bmin, bmax = get_bounds([model])
