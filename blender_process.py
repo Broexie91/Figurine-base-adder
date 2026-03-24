@@ -156,25 +156,27 @@ if is_tripo_voxel:
         nodes.remove(n)
         
     emit = nodes.new('ShaderNodeEmission')
-    vertex_color = nodes.new('ShaderNodeVertexColor')
+    attr = nodes.new('ShaderNodeAttribute')
+    attr.attribute_type = 'GEOMETRY' # Fully supports vertex POINT domains which Blender 4.0 defaults to!
     if vc_name:
-        vertex_color.layer_name = vc_name
+        attr.attribute_name = vc_name
         
     texture_node = nodes.new('ShaderNodeTexImage')
     output = nodes.new('ShaderNodeOutputMaterial')
     
-    # Vertex color → Emission (voor raw color dump bakken)
+    # Attribute color → Emission (voor raw color dump bakken)
     try:
-        links.new(vertex_color.outputs["Color"], emit.inputs["Color"])
+        links.new(attr.outputs["Color"], emit.inputs["Color"])
     except:
-        links.new(vertex_color.outputs[0], emit.inputs[0]) 
+        links.new(attr.outputs[0], emit.inputs[0]) 
         
     try:
         links.new(emit.outputs["Emission"], output.inputs["Surface"])
     except:
         links.new(emit.outputs[0], output.inputs[0])
 
-    img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
+    # alpha=False guarantees alpha blackout bugs are physically impossible to happen!
+    img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024, alpha=False)
     texture_node.image = img
     texture_node.select = True
     nodes.active = texture_node
@@ -196,7 +198,7 @@ if is_tripo_voxel:
         bpy.context.scene.cycles.device = 'CPU'
         
     bpy.context.scene.cycles.samples = 1
-    bpy.context.scene.render.bake.use_clear = True
+    bpy.context.scene.render.bake.use_clear = False # DO NOT clear so we preserve the alpha=1.0 layer natively initialized
     bpy.context.scene.render.bake.margin = 16
         
     bpy.context.view_layer.update()
