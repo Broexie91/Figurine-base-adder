@@ -101,6 +101,114 @@ except Exception as e:
     print("3D Print Toolbox cleanup failed:", e)
 bpy.ops.object.mode_set(mode='OBJECT')
 
+# --- TRIPO3D VOXEL COLOR SUPPORT (BAKING VERTEX COLORS TO TEXTURE) ---
+import os
+mesh = model.data
+has_vc = False
+if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
+    has_vc = True
+elif hasattr(mesh, 'vertex_colors') and len(mesh.vertex_colors) > 0:
+    has_vc = True
+
+if has_vc:
+    has_image_texture = False
+    for mat in mesh.materials:
+        if mat and mat.use_nodes:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    has_image_texture = True
+                    break
+    
+    if not has_image_texture:
+        print("Detected Vertex Colors without Image Texture. Baking to texture...")
+        
+        # 1. Smart UV project
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.smart_project()
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        # 2. Setup baking material using Emission
+        img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
+        
+        vc_name = ""
+        if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
+            vc_name = mesh.color_attributes[0].name
+        else:
+            vc_name = mesh.vertex_colors[0].name
+            
+        bake_mat = bpy.data.materials.new(name="BakeMat")
+        bake_mat.use_nodes = True
+        nodes = bake_mat.node_tree.nodes
+        links = bake_mat.node_tree.links
+        nodes.clear()
+        
+        node_attr = nodes.new(type="ShaderNodeAttribute")
+        node_attr.attribute_name = vc_name
+        
+        node_emit = nodes.new(type="ShaderNodeEmission")
+        links.new(node_attr.outputs["Color"], node_emit.inputs["Color"])
+        
+        node_out = nodes.new(type="ShaderNodeOutputMaterial")
+        links.new(node_emit.outputs["Emission"], node_out.inputs["Surface"])
+        
+        node_tex = nodes.new(type="ShaderNodeTexImage")
+        node_tex.image = img
+        node_tex.select = True
+        nodes.active = node_tex
+        
+        # Assign bake material
+        mesh.materials.clear()
+        mesh.materials.append(bake_mat)
+        model.active_material = bake_mat
+        
+        # Bake
+        old_engine = bpy.context.scene.render.engine
+        bpy.context.scene.render.engine = 'CYCLES'
+        if hasattr(bpy.context.scene.cycles, 'device'):
+            bpy.context.scene.cycles.device = 'CPU'
+            
+        try:
+            bpy.ops.object.bake(type='EMIT', save_mode='EXTERNAL')
+        except Exception as e:
+            print("Baking failed:", e)
+            
+        bpy.context.scene.render.engine = old_engine
+        
+        # 3. Create a final standard material using the baked image
+        final_mat = bpy.data.materials.new(name="TripoBakedMat")
+        final_mat.use_nodes = True
+        fnodes = final_mat.node_tree.nodes
+        flinks = final_mat.node_tree.links
+        
+        bsdf = fnodes.get("Principled BSDF")
+        if bsdf:
+            ftex = fnodes.new(type="ShaderNodeTexImage")
+            ftex.image = img
+            flinks.new(ftex.outputs["Color"], bsdf.inputs["Base Color"])
+            
+            # Reset alpha
+            for input_name in ['Alpha', 'Transmission Weight', 'Transmission']:
+                if input_name in bsdf.inputs:
+                    inp = bsdf.inputs[input_name]
+                    if inp.is_linked:
+                        for link in inp.links:
+                            final_mat.node_tree.links.remove(link)
+                    if 'Alpha' in input_name:
+                        inp.default_value = 1.0
+                    else:
+                        inp.default_value = 0.0
+        
+        mesh.materials.clear()
+        mesh.materials.append(final_mat)
+        
+        # Save image to out_dir
+        out_dir_tmp = os.path.dirname(output_path)
+        img.filepath_raw = os.path.join(out_dir_tmp, "baked_texture.png")
+        img.file_format = 'PNG'
+        img.save()
+        print("Baking complete and saved texture.")
+
 # Herbereken bounds
 bmin, bmax = get_bounds([model])
 
