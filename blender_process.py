@@ -143,8 +143,8 @@ if has_vc:
         links = bake_mat.node_tree.links
         nodes.clear()
         
-        node_attr = nodes.new(type="ShaderNodeAttribute")
-        node_attr.attribute_name = vc_name
+        node_attr = nodes.new(type="ShaderNodeVertexColor")
+        node_attr.layer_name = vc_name
         
         node_emit = nodes.new(type="ShaderNodeEmission")
         links.new(node_attr.outputs["Color"], node_emit.inputs["Color"])
@@ -161,6 +161,11 @@ if has_vc:
         mesh.materials.clear()
         mesh.materials.append(bake_mat)
         model.active_material = bake_mat
+
+        # Ensure active and selected
+        bpy.ops.object.select_all(action='DESELECT')
+        model.select_set(True)
+        bpy.context.view_layer.objects.active = model
 
         old_engine = bpy.context.scene.render.engine
         bpy.context.scene.render.engine = 'CYCLES'
