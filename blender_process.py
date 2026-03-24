@@ -131,31 +131,30 @@ if has_vc:
         # 2. Setup baking material using Emission
         img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
         
-        vc_name = ""
-        if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
-            vc_name = mesh.color_attributes[0].name
-        else:
-            vc_name = mesh.vertex_colors[0].name
-            
-        bake_mat = bpy.data.materials.new(name="BakeMat")
+        # 2. Setup baking material using BSDF Diffuse (per user script)
+        print("Material + vertex color setup...")
+        bake_mat = bpy.data.materials.new(name="Tripo_Baked")
         bake_mat.use_nodes = True
         nodes = bake_mat.node_tree.nodes
         links = bake_mat.node_tree.links
-        nodes.clear()
         
-        node_attr = nodes.new(type="ShaderNodeVertexColor")
-        node_attr.layer_name = vc_name
+        # Verwijder default nodes
+        for n in nodes:
+            nodes.remove(n)
+            
+        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+        vertex_color = nodes.new('ShaderNodeVertexColor')
+        texture_node = nodes.new('ShaderNodeTexImage')
+        output = nodes.new('ShaderNodeOutputMaterial')
         
-        node_emit = nodes.new(type="ShaderNodeEmission")
-        links.new(node_attr.outputs["Color"], node_emit.inputs["Color"])
-        
-        node_out = nodes.new(type="ShaderNodeOutputMaterial")
-        links.new(node_emit.outputs["Emission"], node_out.inputs["Surface"])
-        
-        node_tex = nodes.new(type="ShaderNodeTexImage")
-        node_tex.image = img
-        node_tex.select = True
-        nodes.active = node_tex
+        # Vertex color → BSDF (tijdelijk voor bakken)
+        links.new(vertex_color.outputs[0], bsdf.inputs[0])   # Base Color
+        links.new(bsdf.outputs[0], output.inputs[0])
+
+        img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
+        texture_node.image = img
+        texture_node.select = True
+        nodes.active = texture_node
         
         # Assign bake material
         mesh.materials.clear()
@@ -167,44 +166,25 @@ if has_vc:
         model.select_set(True)
         bpy.context.view_layer.objects.active = model
 
+        print("Bakken starten (DIFFUSE COLOR)...")
         old_engine = bpy.context.scene.render.engine
         bpy.context.scene.render.engine = 'CYCLES'
         if hasattr(bpy.context.scene.cycles, 'device'):
             bpy.context.scene.cycles.device = 'CPU'
             
+        bpy.context.scene.cycles.samples = 1
+        bpy.context.scene.render.bake.use_clear = True
+        bpy.context.scene.render.bake.margin = 16
+            
         try:
-            bpy.ops.object.bake(type='EMIT')
+            bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'})
         except Exception as e:
             print("Baking failed:", e)
             
         bpy.context.scene.render.engine = old_engine
         
-        # 3. Create a final standard material using the baked image
-        final_mat = bpy.data.materials.new(name="TripoBakedMat")
-        final_mat.use_nodes = True
-        fnodes = final_mat.node_tree.nodes
-        flinks = final_mat.node_tree.links
-        
-        fbsdf = fnodes.get("Principled BSDF")
-        if fbsdf:
-            ftex = fnodes.new(type="ShaderNodeTexImage")
-            ftex.image = img
-            flinks.new(ftex.outputs["Color"], fbsdf.inputs["Base Color"])
-            
-            # Reset alpha
-            for input_name in ['Alpha', 'Transmission Weight', 'Transmission']:
-                if input_name in fbsdf.inputs:
-                    inp = fbsdf.inputs[input_name]
-                    if inp.is_linked:
-                        for link in inp.links:
-                            final_mat.node_tree.links.remove(link)
-                    if 'Alpha' in input_name:
-                        inp.default_value = 1.0
-                    else:
-                        inp.default_value = 0.0
-        
-        mesh.materials.clear()
-        mesh.materials.append(final_mat)
+        # 3. Texture node koppelen (nu gebruiken we de gebakken texture als Base Color ipv vertex_color)
+        links.new(texture_node.outputs[0], bsdf.inputs[0])
         # Save image to out_dir
         out_dir_tmp = os.path.dirname(output_path)
         img.filepath_raw = os.path.join(out_dir_tmp, "baked_texture.png")
