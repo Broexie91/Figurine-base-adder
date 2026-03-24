@@ -169,7 +169,7 @@ if has_vc:
             bpy.context.scene.cycles.device = 'CPU'
             
         try:
-            bpy.ops.object.bake(type='EMIT', save_mode='EXTERNAL')
+            bpy.ops.object.bake(type='EMIT')
         except Exception as e:
             print("Baking failed:", e)
             
@@ -207,7 +207,8 @@ if has_vc:
         img.filepath_raw = os.path.join(out_dir_tmp, "baked_texture.png")
         img.file_format = 'PNG'
         img.save()
-        print("Baking complete and saved texture.")
+        img.pack() # Pack it so unpack_all() handles it perfectly with relative paths for OBJ exporter
+        print("Baking complete and packed texture.")
 
 # Herbereken bounds
 bmin, bmax = get_bounds([model])
