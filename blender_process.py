@@ -128,79 +128,78 @@ if has_vc:
         bpy.ops.uv.smart_project()
         bpy.ops.object.mode_set(mode='OBJECT')
         
-        # 2. Extract original color source and setup bake
+        # 2. Setup baking material using Emission
         img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
         
-        has_setup_bake = False
-        if len(mesh.materials) > 0:
-            mat = mesh.materials[0]
-            if mat and mat.use_nodes:
-                nodes = mat.node_tree.nodes
-                links = mat.node_tree.links
-                
-                bsdf = nodes.get("Principled BSDF")
-                out_node = nodes.get("Material Output")
-                
-                if bsdf and out_node:
-                    color_socket = None
-                    if bsdf.inputs["Base Color"].is_linked:
-                        color_socket = bsdf.inputs["Base Color"].links[0].from_socket
-                    
-                    node_emit = nodes.new(type="ShaderNodeEmission")
-                    if color_socket:
-                        links.new(color_socket, node_emit.inputs["Color"])
-                    else:
-                        node_emit.inputs["Color"].default_value = bsdf.inputs["Base Color"].default_value
-                        
-                    links.new(node_emit.outputs["Emission"], out_node.inputs["Surface"])
-                    
-                    node_tex = nodes.new(type="ShaderNodeTexImage")
-                    node_tex.image = img
-                    node_tex.select = True
-                    nodes.active = node_tex
-                    
-                    model.active_material = mat
-                    has_setup_bake = True
+        vc_name = ""
+        if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
+            vc_name = mesh.color_attributes[0].name
+        else:
+            vc_name = mesh.vertex_colors[0].name
+            
+        bake_mat = bpy.data.materials.new(name="BakeMat")
+        bake_mat.use_nodes = True
+        nodes = bake_mat.node_tree.nodes
+        links = bake_mat.node_tree.links
+        nodes.clear()
+        
+        node_attr = nodes.new(type="ShaderNodeAttribute")
+        node_attr.attribute_name = vc_name
+        
+        node_emit = nodes.new(type="ShaderNodeEmission")
+        links.new(node_attr.outputs["Color"], node_emit.inputs["Color"])
+        
+        node_out = nodes.new(type="ShaderNodeOutputMaterial")
+        links.new(node_emit.outputs["Emission"], node_out.inputs["Surface"])
+        
+        node_tex = nodes.new(type="ShaderNodeTexImage")
+        node_tex.image = img
+        node_tex.select = True
+        nodes.active = node_tex
+        
+        # Assign bake material
+        mesh.materials.clear()
+        mesh.materials.append(bake_mat)
+        model.active_material = bake_mat
 
-        if has_setup_bake:
-            old_engine = bpy.context.scene.render.engine
-            bpy.context.scene.render.engine = 'CYCLES'
-            if hasattr(bpy.context.scene.cycles, 'device'):
-                bpy.context.scene.cycles.device = 'CPU'
-                
-            try:
-                bpy.ops.object.bake(type='EMIT')
-            except Exception as e:
-                print("Baking failed:", e)
-                
-            bpy.context.scene.render.engine = old_engine
+        old_engine = bpy.context.scene.render.engine
+        bpy.context.scene.render.engine = 'CYCLES'
+        if hasattr(bpy.context.scene.cycles, 'device'):
+            bpy.context.scene.cycles.device = 'CPU'
             
-            # 3. Create a final standard material using the baked image
-            final_mat = bpy.data.materials.new(name="TripoBakedMat")
-            final_mat.use_nodes = True
-            fnodes = final_mat.node_tree.nodes
-            flinks = final_mat.node_tree.links
+        try:
+            bpy.ops.object.bake(type='EMIT')
+        except Exception as e:
+            print("Baking failed:", e)
             
-            fbsdf = fnodes.get("Principled BSDF")
-            if fbsdf:
-                ftex = fnodes.new(type="ShaderNodeTexImage")
-                ftex.image = img
-                flinks.new(ftex.outputs["Color"], fbsdf.inputs["Base Color"])
-                
-                # Reset alpha
-                for input_name in ['Alpha', 'Transmission Weight', 'Transmission']:
-                    if input_name in fbsdf.inputs:
-                        inp = fbsdf.inputs[input_name]
-                        if inp.is_linked:
-                            for link in inp.links:
-                                final_mat.node_tree.links.remove(link)
-                        if 'Alpha' in input_name:
-                            inp.default_value = 1.0
-                        else:
-                            inp.default_value = 0.0
+        bpy.context.scene.render.engine = old_engine
+        
+        # 3. Create a final standard material using the baked image
+        final_mat = bpy.data.materials.new(name="TripoBakedMat")
+        final_mat.use_nodes = True
+        fnodes = final_mat.node_tree.nodes
+        flinks = final_mat.node_tree.links
+        
+        fbsdf = fnodes.get("Principled BSDF")
+        if fbsdf:
+            ftex = fnodes.new(type="ShaderNodeTexImage")
+            ftex.image = img
+            flinks.new(ftex.outputs["Color"], fbsdf.inputs["Base Color"])
             
-            mesh.materials.clear()
-            mesh.materials.append(final_mat)
+            # Reset alpha
+            for input_name in ['Alpha', 'Transmission Weight', 'Transmission']:
+                if input_name in fbsdf.inputs:
+                    inp = fbsdf.inputs[input_name]
+                    if inp.is_linked:
+                        for link in inp.links:
+                            final_mat.node_tree.links.remove(link)
+                    if 'Alpha' in input_name:
+                        inp.default_value = 1.0
+                    else:
+                        inp.default_value = 0.0
+        
+        mesh.materials.clear()
+        mesh.materials.append(final_mat)
         # Save image to out_dir
         out_dir_tmp = os.path.dirname(output_path)
         img.filepath_raw = os.path.join(out_dir_tmp, "baked_texture.png")
