@@ -133,6 +133,17 @@ if has_vc:
         
         # 2. Setup baking material using BSDF Diffuse (per user script)
         print("Material + vertex color setup...")
+        
+        # ACTIVATE Vertex Color layer explicitly so Blender 4.0 renders it
+        vc_name = ""
+        if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
+            mesh.color_attributes.active_color_index = 0
+            mesh.color_attributes.render_color_index = 0
+            vc_name = mesh.color_attributes[0].name
+        elif hasattr(mesh, 'vertex_colors') and len(mesh.vertex_colors) > 0:
+            mesh.vertex_colors.active_index = 0
+            vc_name = mesh.vertex_colors[0].name
+            
         bake_mat = bpy.data.materials.new(name="Tripo_Baked")
         bake_mat.use_nodes = True
         nodes = bake_mat.node_tree.nodes
@@ -144,12 +155,22 @@ if has_vc:
             
         bsdf = nodes.new('ShaderNodeBsdfPrincipled')
         vertex_color = nodes.new('ShaderNodeVertexColor')
+        if vc_name:
+            vertex_color.layer_name = vc_name
+            
         texture_node = nodes.new('ShaderNodeTexImage')
         output = nodes.new('ShaderNodeOutputMaterial')
         
         # Vertex color → BSDF (tijdelijk voor bakken)
-        links.new(vertex_color.outputs[0], bsdf.inputs[0])   # Base Color
-        links.new(bsdf.outputs[0], output.inputs[0])
+        try:
+            links.new(vertex_color.outputs["Color"], bsdf.inputs["Base Color"])
+        except:
+            links.new(vertex_color.outputs[0], bsdf.inputs[0]) # Fallback for old blender
+            
+        try:
+            links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+        except:
+            links.new(bsdf.outputs[0], output.inputs[0])
 
         img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
         texture_node.image = img
@@ -176,6 +197,8 @@ if has_vc:
         bpy.context.scene.render.bake.use_clear = True
         bpy.context.scene.render.bake.margin = 16
             
+        bpy.context.view_layer.update()
+        
         try:
             bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'})
         except Exception as e:
