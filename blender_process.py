@@ -88,133 +88,161 @@ scale_factor = desired_height_mm / current_height
 model.scale *= scale_factor
 bpy.ops.object.transform_apply(scale=True)
 
-# ---> NIEUW: 3D Print Toolbox Cleanup <---
-# Nu we robuuste gebundelde mesh hebben, versmelten we alles met de 3D Print Toolbox.
-bpy.ops.object.mode_set(mode='EDIT')
-bpy.ops.mesh.select_all(action='SELECT')
-# 1. Merge bij elkaar liggende vertices (0.01mm) om van 300 losse shells één geheel te maken
-bpy.ops.mesh.remove_doubles(threshold=0.01)
-# 2. Gebruik de gouden 3D Print Toolbox functie om resterende intersecties en gaten (holes) netjes dicht te ritsen
-try:
-    bpy.ops.mesh.print3d_clean_non_manifold()
-except Exception as e:
-    print("3D Print Toolbox cleanup failed:", e)
-bpy.ops.object.mode_set(mode='OBJECT')
-
-# --- TRIPO3D VOXEL COLOR SUPPORT (BAKING VERTEX COLORS TO TEXTURE) ---
-import os
 mesh = model.data
+
 has_vc = False
 if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
     has_vc = True
 elif hasattr(mesh, 'vertex_colors') and len(mesh.vertex_colors) > 0:
     has_vc = True
 
+has_image_texture = False
 if has_vc:
-    has_image_texture = False
     for mat in mesh.materials:
         if mat and mat.use_nodes:
             for node in mat.node_tree.nodes:
                 if node.type == 'TEX_IMAGE' and node.image:
                     has_image_texture = True
                     break
+
+is_tripo_voxel = has_vc and not has_image_texture
+
+# ---> NIEUW: 3D Print Toolbox Cleanup <---
+# We only run the aggressive cleanup on standard/Meshy models because 
+# print3d_clean_non_manifold historically destroys or corrupts Vertex Color layers during BMesh rebuilding!
+if not is_tripo_voxel:
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    # 1. Merge bij elkaar liggende vertices (0.01mm) om van 300 losse shells één geheel te maken
+    bpy.ops.mesh.remove_doubles(threshold=0.01)
+    # 2. Gebruik de gouden 3D Print Toolbox functie om resterende intersecties en gaten (holes) netjes dicht te ritsen
+    try:
+        bpy.ops.mesh.print3d_clean_non_manifold()
+    except Exception as e:
+        print("3D Print Toolbox cleanup failed:", e)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+# --- TRIPO3D VOXEL COLOR SUPPORT (BAKING VERTEX COLORS TO TEXTURE) ---
+import os
+
+if is_tripo_voxel:
+    print("Detected Vertex Colors without Image Texture. Baking to texture...")
     
-    if not has_image_texture:
-        print("Detected Vertex Colors without Image Texture. Baking to texture...")
+    # 1. Smart UV project
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.uv.smart_project()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # 2. Setup baking material using BSDF Diffuse (per user script)
+    print("Material + vertex color setup...")
+    
+    # ACTIVATE Vertex Color layer explicitly so Blender 4.0 renders it
+    vc_name = ""
+    if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
+        mesh.color_attributes.active_color_index = 0
+        mesh.color_attributes.render_color_index = 0
+        vc_name = mesh.color_attributes[0].name
+    elif hasattr(mesh, 'vertex_colors') and len(mesh.vertex_colors) > 0:
+        mesh.vertex_colors.active_index = 0
+        vc_name = mesh.vertex_colors[0].name
         
-        # 1. Smart UV project
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
-        bpy.ops.uv.smart_project()
-        bpy.ops.object.mode_set(mode='OBJECT')
+    bake_mat = bpy.data.materials.new(name="Tripo_Baked")
+    bake_mat.use_nodes = True
+    nodes = bake_mat.node_tree.nodes
+    links = bake_mat.node_tree.links
+    
+    # Verwijder default nodes
+    for n in nodes:
+        nodes.remove(n)
         
-        # 2. Setup baking material using Emission
-        img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
+    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    vertex_color = nodes.new('ShaderNodeVertexColor')
+    if vc_name:
+        vertex_color.layer_name = vc_name
         
-        # 2. Setup baking material using BSDF Diffuse (per user script)
-        print("Material + vertex color setup...")
+    texture_node = nodes.new('ShaderNodeTexImage')
+    output = nodes.new('ShaderNodeOutputMaterial')
+    
+    # Vertex color → BSDF (tijdelijk voor bakken)
+    try:
+        links.new(vertex_color.outputs["Color"], bsdf.inputs["Base Color"])
+    except:
+        links.new(vertex_color.outputs[0], bsdf.inputs[0]) # Fallback for old blender
         
-        # ACTIVATE Vertex Color layer explicitly so Blender 4.0 renders it
-        vc_name = ""
-        if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
-            mesh.color_attributes.active_color_index = 0
-            mesh.color_attributes.render_color_index = 0
-            vc_name = mesh.color_attributes[0].name
-        elif hasattr(mesh, 'vertex_colors') and len(mesh.vertex_colors) > 0:
-            mesh.vertex_colors.active_index = 0
-            vc_name = mesh.vertex_colors[0].name
-            
-        bake_mat = bpy.data.materials.new(name="Tripo_Baked")
-        bake_mat.use_nodes = True
-        nodes = bake_mat.node_tree.nodes
-        links = bake_mat.node_tree.links
-        
-        # Verwijder default nodes
-        for n in nodes:
-            nodes.remove(n)
-            
-        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
-        vertex_color = nodes.new('ShaderNodeVertexColor')
-        if vc_name:
-            vertex_color.layer_name = vc_name
-            
-        texture_node = nodes.new('ShaderNodeTexImage')
-        output = nodes.new('ShaderNodeOutputMaterial')
-        
-        # Vertex color → BSDF (tijdelijk voor bakken)
-        try:
-            links.new(vertex_color.outputs["Color"], bsdf.inputs["Base Color"])
-        except:
-            links.new(vertex_color.outputs[0], bsdf.inputs[0]) # Fallback for old blender
-            
-        try:
-            links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
-        except:
-            links.new(bsdf.outputs[0], output.inputs[0])
+    try:
+        links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+    except:
+        links.new(bsdf.outputs[0], output.inputs[0])
 
-        img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
-        texture_node.image = img
-        texture_node.select = True
-        nodes.active = texture_node
-        
-        # Assign bake material
-        mesh.materials.clear()
-        mesh.materials.append(bake_mat)
-        model.active_material = bake_mat
+    img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
+    texture_node.image = img
+    texture_node.select = True
+    nodes.active = texture_node
+    
+    # Assign bake material
+    mesh.materials.clear()
+    mesh.materials.append(bake_mat)
+    model.active_material = bake_mat
 
-        # Ensure active and selected
-        bpy.ops.object.select_all(action='DESELECT')
-        model.select_set(True)
-        bpy.context.view_layer.objects.active = model
+    # Ensure active and selected
+    bpy.ops.object.select_all(action='DESELECT')
+    model.select_set(True)
+    bpy.context.view_layer.objects.active = model
 
-        print("Bakken starten (DIFFUSE COLOR)...")
-        old_engine = bpy.context.scene.render.engine
-        bpy.context.scene.render.engine = 'CYCLES'
-        if hasattr(bpy.context.scene.cycles, 'device'):
-            bpy.context.scene.cycles.device = 'CPU'
-            
-        bpy.context.scene.cycles.samples = 1
-        bpy.context.scene.render.bake.use_clear = True
-        bpy.context.scene.render.bake.margin = 16
-            
-        bpy.context.view_layer.update()
+    print("Bakken starten (DIFFUSE COLOR)...")
+    old_engine = bpy.context.scene.render.engine
+    bpy.context.scene.render.engine = 'CYCLES'
+    if hasattr(bpy.context.scene.cycles, 'device'):
+        bpy.context.scene.cycles.device = 'CPU'
         
-        try:
-            bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'})
-        except Exception as e:
-            print("Baking failed:", e)
-            
-        bpy.context.scene.render.engine = old_engine
+    bpy.context.scene.cycles.samples = 1
+    bpy.context.scene.render.bake.use_clear = True
+    bpy.context.scene.render.bake.margin = 16
         
-        # 3. Texture node koppelen (nu gebruiken we de gebakken texture als Base Color ipv vertex_color)
-        links.new(texture_node.outputs[0], bsdf.inputs[0])
-        # Save image to out_dir
-        out_dir_tmp = os.path.dirname(output_path)
-        img.filepath_raw = os.path.join(out_dir_tmp, "baked_texture.png")
-        img.file_format = 'PNG'
-        img.save()
-        img.pack() # Pack it so unpack_all() handles it perfectly with relative paths for OBJ exporter
-        print("Baking complete and packed texture.")
+    bpy.context.view_layer.update()
+    
+    try:
+        bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'})
+    except Exception as e:
+        print("Baking failed:", e)
+        
+    bpy.context.scene.render.engine = old_engine
+    
+    # 3. Create a final standard material using the baked image
+    final_mat = bpy.data.materials.new(name="TripoBakedMat")
+    final_mat.use_nodes = True
+    fnodes = final_mat.node_tree.nodes
+    flinks = final_mat.node_tree.links
+    
+    fbsdf = fnodes.get("Principled BSDF")
+    if fbsdf:
+        ftex = fnodes.new(type="ShaderNodeTexImage")
+        ftex.image = img
+        flinks.new(ftex.outputs["Color"], fbsdf.inputs["Base Color"])
+        
+        # Reset alpha
+        for input_name in ['Alpha', 'Transmission Weight', 'Transmission']:
+            if input_name in fbsdf.inputs:
+                inp = fbsdf.inputs[input_name]
+                if inp.is_linked:
+                    for link in inp.links:
+                        final_mat.node_tree.links.remove(link)
+                if 'Alpha' in input_name:
+                    inp.default_value = 1.0
+                else:
+                    inp.default_value = 0.0
+    
+    mesh.materials.clear()
+    mesh.materials.append(final_mat)
+    
+    # Save image to out_dir
+    out_dir_tmp = os.path.dirname(output_path)
+    img.filepath_raw = os.path.join(out_dir_tmp, "baked_texture.png")
+    img.file_format = 'PNG'
+    img.save()
+    img.pack() # Pack it so unpack_all() handles it perfectly with relative paths for OBJ exporter
+    print("Baking complete and packed texture.")
 
 # Herbereken bounds
 bmin, bmax = get_bounds([model])
