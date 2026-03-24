@@ -134,7 +134,7 @@ if is_tripo_voxel:
     bpy.ops.uv.smart_project()
     bpy.ops.object.mode_set(mode='OBJECT')
     
-    # 2. Setup baking material using BSDF Diffuse (per user script)
+    # 2. Setup baking material using Emission for guaranteed un-lit evaluation
     print("Material + vertex color setup...")
     
     # ACTIVATE Vertex Color layer explicitly so Blender 4.0 renders it
@@ -152,11 +152,10 @@ if is_tripo_voxel:
     nodes = bake_mat.node_tree.nodes
     links = bake_mat.node_tree.links
     
-    # Verwijder default nodes
     for n in nodes:
         nodes.remove(n)
         
-    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    emit = nodes.new('ShaderNodeEmission')
     vertex_color = nodes.new('ShaderNodeVertexColor')
     if vc_name:
         vertex_color.layer_name = vc_name
@@ -164,16 +163,16 @@ if is_tripo_voxel:
     texture_node = nodes.new('ShaderNodeTexImage')
     output = nodes.new('ShaderNodeOutputMaterial')
     
-    # Vertex color → BSDF (tijdelijk voor bakken)
+    # Vertex color → Emission (voor raw color dump bakken)
     try:
-        links.new(vertex_color.outputs["Color"], bsdf.inputs["Base Color"])
+        links.new(vertex_color.outputs["Color"], emit.inputs["Color"])
     except:
-        links.new(vertex_color.outputs[0], bsdf.inputs[0]) # Fallback for old blender
+        links.new(vertex_color.outputs[0], emit.inputs[0]) 
         
     try:
-        links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+        links.new(emit.outputs["Emission"], output.inputs["Surface"])
     except:
-        links.new(bsdf.outputs[0], output.inputs[0])
+        links.new(emit.outputs[0], output.inputs[0])
 
     img = bpy.data.images.new(name="BakedTexture", width=1024, height=1024)
     texture_node.image = img
@@ -190,7 +189,7 @@ if is_tripo_voxel:
     model.select_set(True)
     bpy.context.view_layer.objects.active = model
 
-    print("Bakken starten (DIFFUSE COLOR)...")
+    print("Bakken starten (EMISSION COLOR)...")
     old_engine = bpy.context.scene.render.engine
     bpy.context.scene.render.engine = 'CYCLES'
     if hasattr(bpy.context.scene.cycles, 'device'):
@@ -203,7 +202,7 @@ if is_tripo_voxel:
     bpy.context.view_layer.update()
     
     try:
-        bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'})
+        bpy.ops.object.bake(type='EMIT')
     except Exception as e:
         print("Baking failed:", e)
         
