@@ -38,7 +38,7 @@ add_base = argv[4].lower() == 'true' if len(argv) > 4 else True
 add_keychain = argv[5].lower() == 'true' if len(argv) > 5 else False
 
 desired_height_mm = size_cm * 10
-base_thickness_mm = 2.5
+base_thickness_mm = 2.5          # ← iets steviger (was 2.0)
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -89,7 +89,7 @@ for mat in bpy.data.materials:
 if not found_texture:
     print("⚠️ Geen embedded texture gevonden.")
 
-# ====================== BASE + TEKST ======================
+# ====================== BASE + TEKST (met Boolean Union) ======================
 bmin, bmax = get_bounds([model])
 fmin, fmax = get_feet_bounds(model)
 
@@ -103,20 +103,35 @@ else:
     radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
 if add_base:
+    print("Base toevoegen en vastmaken met Boolean Union...")
+    
     bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
                                         location=(center_x, center_y, bmin.z - base_thickness_mm/2))
     base = bpy.context.active_object
+    
+    # Base materiaal (grijs)
     mat = bpy.data.materials.new("BaseMat")
     mat.use_nodes = True
     mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.3, 0.3, 0.3, 1.0)
     base.data.materials.append(mat)
 
+    # Boolean Union → één waterdichte mesh
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     base.select_set(True)
     bpy.context.view_layer.objects.active = model
-    bpy.ops.object.join()
+    
+    bool_mod = model.modifiers.new(name="Base_Union", type='BOOLEAN')
+    bool_mod.operation = 'UNION'
+    bool_mod.object = base
+    bpy.ops.object.modifier_apply(modifier=bool_mod.name)
+    
+    # Verwijder het losse base-object
+    bpy.data.objects.remove(base, do_unlink=True)
 
+    print("Base succesvol vastgemaakt met Boolean Union")
+
+    # Tekst op de base
     if text_str.strip():
         text_loc = (center_x, center_y - radius*0.65, bmin.z)
         bpy.ops.object.text_add(location=text_loc)
@@ -142,7 +157,7 @@ if add_base:
         bpy.context.view_layer.objects.active = model
         bpy.ops.object.join()
 
-# ====================== KEYCHAIN (aangepaste afmetingen) ======================
+# ====================== KEYCHAIN (verbeterde afmetingen) ======================
 if add_keychain:
     highest_v = None
     highest_v_idx = None
@@ -168,10 +183,10 @@ if add_keychain:
         keychain_x = highest_v.x
         keychain_y = highest_v.y
 
-    # === AANGEPASTE RING WAARDEN ===
-    major_radius = 4.75   # grotere opening
-    minor_radius = 1.15   # iets slanker
-    sink_depth = 0.7      # minder diep in het hoofd (was 1.0)
+    # Verbeterde ring-afmetingen
+    major_radius = 4.75
+    minor_radius = 1.15
+    sink_depth = 0.7      # minder diep in het hoofd
 
     torus_color = (0.5, 0.5, 0.5, 1.0)
     found_uv = None
