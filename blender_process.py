@@ -2,7 +2,6 @@ import bpy
 import sys
 import math
 import os
-import zipfile
 from mathutils import Vector
 import addon_utils
 
@@ -66,12 +65,11 @@ scale_factor = desired_height_mm / current_height
 model.scale *= scale_factor
 bpy.ops.object.transform_apply(scale=True)
 
-# ====================== TEXTURE UITPAKKEN (voor nieuwe Tripo GLB's) ======================
+# ====================== TEXTURE UITPAKKEN ======================
 out_dir = os.path.dirname(output_path)
 texture_path = os.path.join(out_dir, "model.png")
 
 found_texture = False
-
 print("Zoeken naar embedded textures...")
 for mat in bpy.data.materials:
     if mat.use_nodes:
@@ -79,7 +77,6 @@ for mat in bpy.data.materials:
             if node.type == 'TEX_IMAGE' and node.image:
                 img = node.image
                 print(f"Texture gevonden: {img.name} ({img.size[0]}x{img.size[1]})")
-                # Sla op als model.png
                 img.filepath_raw = texture_path
                 img.file_format = 'PNG'
                 img.save()
@@ -90,9 +87,9 @@ for mat in bpy.data.materials:
             break
 
 if not found_texture:
-    print("⚠️ Geen embedded texture gevonden in het materiaal.")
+    print("⚠️ Geen embedded texture gevonden.")
 
-# ====================== BASE + TEKST + KEYCHAIN ======================
+# ====================== BASE + TEKST ======================
 bmin, bmax = get_bounds([model])
 fmin, fmax = get_feet_bounds(model)
 
@@ -145,13 +142,84 @@ if add_base:
         bpy.context.view_layer.objects.active = model
         bpy.ops.object.join()
 
+# ====================== KEYCHAIN (jouw originele code) ======================
 if add_keychain:
-    # (je keychain code hier - laat staan zoals hij was)
-    pass   # vervang door je volledige keychain blok als je hem wilt
+    highest_v = None
+    highest_v_idx = None
+    max_z = -float('inf')
+    mesh = model.data
+    verts_world = [model.matrix_world @ v.co for v in mesh.vertices]
+    center_x = (bmin.x + bmax.x) / 2
+    center_y = (bmin.y + bmax.y) / 2
 
-# ====================== EXPORT + ZIP ======================
-base_name = os.path.splitext(os.path.basename(output_path))[0]
+    for i, v in enumerate(verts_world):
+        if math.hypot(v.x - center_x, v.y - center_y) < 15.0:
+            if v.z > max_z:
+                max_z = v.z
+                highest_v = v
+                highest_v_idx = i
 
+    if highest_v is None:
+        keychain_z = bmax.z
+        keychain_x = center_x
+        keychain_y = center_y
+    else:
+        keychain_z = highest_v.z
+        keychain_x = highest_v.x
+        keychain_y = highest_v.y
+
+    torus_color = (0.5, 0.5, 0.5, 1.0)
+    found_uv = None
+    if highest_v_idx is not None and model.data.uv_layers.active and len(model.data.materials) > 0:
+        try:
+            for loop in model.data.loops:
+                if loop.vertex_index == highest_v_idx:
+                    uv = model.data.uv_layers.active.data[loop.index].uv
+                    found_uv = uv
+                    break
+            if found_uv:
+                mat = model.data.materials[0]
+                if mat and mat.use_nodes:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE' and node.image:
+                            img = node.image
+                            w, h = img.size
+                            x = max(0, min(w-1, int((uv.x % 1.0) * w)))
+                            y = max(0, min(h-1, int((uv.y % 1.0) * h)))
+                            idx = (y * w + x) * 4
+                            if idx + 3 < len(img.pixels):
+                                torus_color = tuple(img.pixels[idx:idx+4])
+                            break
+        except Exception:
+            pass
+
+    bpy.ops.mesh.primitive_torus_add(
+        major_radius=4.0,
+        minor_radius=1.2,
+        location=(keychain_x, keychain_y, keychain_z - 1.0),
+        rotation=(math.radians(90), 0, 0),
+        generate_uvs=True
+    )
+    torus = bpy.context.active_object
+
+    if found_uv is not None and len(model.data.materials) > 0:
+        torus.data.materials.append(model.data.materials[0])
+        if torus.data.uv_layers.active:
+            for loop in torus.data.loops:
+                torus.data.uv_layers.active.data[loop.index].uv = found_uv
+    else:
+        tmat = bpy.data.materials.new("RingMat")
+        tmat.use_nodes = True
+        tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = torus_color
+        torus.data.materials.append(tmat)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    model.select_set(True)
+    torus.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.join()
+
+# ====================== EXPORT OBJ + MTL ======================
 bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
 
@@ -164,17 +232,5 @@ bpy.ops.wm.obj_export(
     export_uv=True
 )
 
-zip_path = os.path.join(out_dir, f"{base_name}.zip")
-with zipfile.ZipFile(zip_path, 'w') as z:
-    if os.path.exists(output_path):
-        z.write(output_path, f"{base_name}.obj")
-    mtl_path = output_path.replace('.obj', '.mtl')
-    if os.path.exists(mtl_path):
-        z.write(mtl_path, f"{base_name}.mtl")
-    if os.path.exists(texture_path):
-        z.write(texture_path, f"{base_name}.png")
-        print(f"✅ PNG toegevoegd aan ZIP: {base_name}.png")
-    else:
-        print("⚠️ Geen model.png gevonden!")
-
-print(f"SUCCESS: ZIP aangemaakt → {zip_path}")
+print(f"Export voltooid: {output_path}")
+print(f"Texture aanwezig: {texture_path}")
