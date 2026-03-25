@@ -6,19 +6,16 @@ import tempfile
 from pathlib import Path
 import subprocess
 import os
+import zipfile
+import io
 
 app = FastAPI(title="GLB Figurine Base Adder")
 
 @app.get("/test-blender")
 def test_blender():
-    """
-    Test of Blender correct aangeroepen kan worden (handig voor debug).
-    """
     try:
-        cmd = [
-            "blender", "-b", "--python", "/app/blender_process.py", "--",
-            "test_input.glb", "test_output.glb", "10", "test"
-        ]
+        cmd = ["blender", "-b", "--python", "/app/blender_process.py", "--",
+               "test_input.glb", "test_output.obj", "10", "test", "true", "false"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return {
             "returncode": result.returncode,
@@ -46,14 +43,14 @@ async def add_base(request: BaseRequest):
         input_glb = tmp_path / "input.glb"
         output_obj = tmp_path / "output.obj"
 
-        # Download model file from URL
+        # Download model
         try:
             async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                 response = await client.get(request.model_url)
                 response.raise_for_status()
                 content = response.content
         except Exception as e:
-            print(f"Error downloading model from {request.model_url}: {str(e)}")
+            print(f"Error downloading model: {str(e)}")
             raise HTTPException(status_code=400, detail=f"Fout bij downloaden model: {str(e)}")
 
         with open(input_glb, "wb") as f:
@@ -64,7 +61,7 @@ async def add_base(request: BaseRequest):
 
         text_arg = request.text if request.text.strip() else "--NO-TEXT--"
 
-        # Blender aanroepen met Xvfb (virtueel display)
+        # Blender aanroepen
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
@@ -73,15 +70,8 @@ async def add_base(request: BaseRequest):
         ]
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,  # 2 minuten max
-                env=os.environ.copy()  # behoud env vars
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
-            # Log de output van Blender (heel belangrijk voor debug!)
             print("Blender stdout:")
             print(result.stdout)
             print("Blender stderr:")
@@ -89,21 +79,18 @@ async def add_base(request: BaseRequest):
             print(f"Return code: {result.returncode}")
 
             if result.returncode != 0 or not output_obj.exists():
-                error_msg = result.stderr.strip() or "Geen output bestand aangemaakt"
-                print(f"Blender processing failed: {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Verwerking mislukt: {error_msg}")
+                raise HTTPException(status_code=500, detail="Blender verwerking mislukt")
 
             print("SUCCESS: output.obj created")
 
-            import zipfile
-            import io
-
+            # === NETTE ZIP MAKEN ===
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-                # Zip only the flat root files to avoid duplicating the /textures subfolder
                 for file_path in tmp_path.iterdir():
-                    if file_path.is_file() and file_path.suffix not in ['.glb', '.blend']:
-                        zipf.write(file_path, arcname=file_path.name)
+                    if file_path.is_file() and file_path.suffix.lower() in ['.obj', '.mtl', '.png']:
+                        # Schone namen: model.obj, model.mtl, model.png
+                        clean_name = "model" + file_path.suffix.lower()
+                        zipf.write(file_path, arcname=clean_name)
 
             zip_buffer.seek(0)
             zip_data = zip_buffer.read()
@@ -117,7 +104,7 @@ async def add_base(request: BaseRequest):
             )
 
         except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=500, detail="Verwerking timeout (te lang bezig)")
+            raise HTTPException(status_code=500, detail="Verwerking timeout")
         except Exception as e:
             print(f"Unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Onverwachte fout: {str(e)}")
