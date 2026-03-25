@@ -142,7 +142,7 @@ if add_base:
         bpy.context.view_layer.objects.active = model
         bpy.ops.object.join()
 
-# ====================== KEYCHAIN (jouw originele code) ======================
+# ====================== KEYCHAIN (aangepaste afmetingen) ======================
 if add_keychain:
     highest_v = None
     highest_v_idx = None
@@ -168,8 +168,14 @@ if add_keychain:
         keychain_x = highest_v.x
         keychain_y = highest_v.y
 
+    # === AANGEPASTE RING WAARDEN ===
+    major_radius = 4.75   # grotere opening
+    minor_radius = 1.15   # iets slanker
+    sink_depth = 0.7      # minder diep in het hoofd (was 1.0)
+
     torus_color = (0.5, 0.5, 0.5, 1.0)
     found_uv = None
+
     if highest_v_idx is not None and model.data.uv_layers.active and len(model.data.materials) > 0:
         try:
             for loop in model.data.loops:
@@ -194,9 +200,9 @@ if add_keychain:
             pass
 
     bpy.ops.mesh.primitive_torus_add(
-        major_radius=4.0,
-        minor_radius=1.2,
-        location=(keychain_x, keychain_y, keychain_z - 1.0),
+        major_radius=major_radius,
+        minor_radius=minor_radius,
+        location=(keychain_x, keychain_y, keychain_z - sink_depth),
         rotation=(math.radians(90), 0, 0),
         generate_uvs=True
     )
