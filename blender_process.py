@@ -38,7 +38,7 @@ add_base = argv[4].lower() == 'true' if len(argv) > 4 else True
 add_keychain = argv[5].lower() == 'true' if len(argv) > 5 else False
 
 desired_height_mm = size_cm * 10
-base_thickness_mm = 2.0
+base_thickness_mm = 2.5
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
