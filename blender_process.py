@@ -89,7 +89,7 @@ for mat in bpy.data.materials:
 if not found_texture:
     print("⚠️ Geen embedded texture gevonden.")
 
-# ====================== BASE + TEKST (licht grijs + Boolean Union + expliciete materiaal toewijzing) ======================
+# ====================== BASE + TEKST (licht grijs + Boolean Union) ======================
 bmin, bmax = get_bounds([model])
 fmin, fmax = get_feet_bounds(model)
 
@@ -130,20 +130,19 @@ if add_base:
     # Verwijder losse base
     bpy.data.objects.remove(base, do_unlink=True)
 
-    # === BELANGRIJK: expliciet lichtgrijs materiaal toewijzen aan de base-faces ===
-    if base_mat not in model.data.materials:
+    # Expliciet lichtgrijs materiaal toewijzen aan de base-faces
+    if base_mat.name not in model.data.materials:
         model.data.materials.append(base_mat)
     base_mat_index = model.data.materials.find(base_mat.name)
 
-    # Assign base material to the lowest faces (de base)
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='DESELECT')
     bpy.ops.object.mode_set(mode='OBJECT')
 
     mesh = model.data
     for face in mesh.polygons:
-        face_center_z = sum((model.matrix_world @ v.co).z for v in [mesh.vertices[i] for i in face.vertices]) / len(face.vertices)
-        if face_center_z < bmin.z + 0.1:          # deze faces horen bij de base
+        face_center_z = sum((model.matrix_world @ mesh.vertices[i].co).z for i in face.vertices) / len(face.vertices)
+        if face_center_z < bmin.z + 0.2:   # faces die bij de base horen
             face.material_index = base_mat_index
 
     print("✅ Base heeft nu expliciet lichtgrijs materiaal")
@@ -174,9 +173,8 @@ if add_base:
         bpy.context.view_layer.objects.active = model
         bpy.ops.object.join()
 
-# ====================== KEYCHAIN ======================
+# ====================== KEYCHAIN (volledig behouden) ======================
 if add_keychain:
-    # (je volledige keychain-code met de verbeterde afmetingen)
     highest_v = None
     highest_v_idx = None
     max_z = -float('inf')
@@ -201,6 +199,7 @@ if add_keychain:
         keychain_x = highest_v.x
         keychain_y = highest_v.y
 
+    # Verbeterde ring-afmetingen
     major_radius = 4.75
     minor_radius = 1.15
     sink_depth = 0.7
