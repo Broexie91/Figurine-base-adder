@@ -38,7 +38,7 @@ add_base = argv[4].lower() == 'true' if len(argv) > 4 else True
 add_keychain = argv[5].lower() == 'true' if len(argv) > 5 else False
 
 desired_height_mm = size_cm * 10
-base_thickness_mm = 2.5          # stevig genoeg
+base_thickness_mm = 2.5
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -89,7 +89,7 @@ for mat in bpy.data.materials:
 if not found_texture:
     print("⚠️ Geen embedded texture gevonden.")
 
-# ====================== BASE + TEKST (licht grijs + Boolean Union) ======================
+# ====================== BASE + TEKST (licht grijs + Boolean Union + expliciete materiaal toewijzing) ======================
 bmin, bmax = get_bounds([model])
 fmin, fmax = get_feet_bounds(model)
 
@@ -109,14 +109,14 @@ if add_base:
                                         location=(center_x, center_y, bmin.z - base_thickness_mm/2))
     base = bpy.context.active_object
 
-    # === LICHT GRIJS MATERIAAL ===
+    # Licht grijs materiaal voor de base
     base_mat = bpy.data.materials.new("BaseMat")
     base_mat.use_nodes = True
     bsdf = base_mat.node_tree.nodes["Principled BSDF"]
     bsdf.inputs[0].default_value = (0.75, 0.75, 0.75, 1.0)   # licht grijs
     base.data.materials.append(base_mat)
 
-    # Boolean Union → één mesh
+    # Boolean Union
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     base.select_set(True)
@@ -130,7 +130,23 @@ if add_base:
     # Verwijder losse base
     bpy.data.objects.remove(base, do_unlink=True)
 
-    print("Base succesvol vastgemaakt met licht grijs materiaal")
+    # === BELANGRIJK: expliciet lichtgrijs materiaal toewijzen aan de base-faces ===
+    if base_mat not in model.data.materials:
+        model.data.materials.append(base_mat)
+    base_mat_index = model.data.materials.find(base_mat.name)
+
+    # Assign base material to the lowest faces (de base)
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='DESELECT')
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    mesh = model.data
+    for face in mesh.polygons:
+        face_center_z = sum((model.matrix_world @ v.co).z for v in [mesh.vertices[i] for i in face.vertices]) / len(face.vertices)
+        if face_center_z < bmin.z + 0.1:          # deze faces horen bij de base
+            face.material_index = base_mat_index
+
+    print("✅ Base heeft nu expliciet lichtgrijs materiaal")
 
     # Tekst op de base (optioneel)
     if text_str.strip():
@@ -160,6 +176,7 @@ if add_base:
 
 # ====================== KEYCHAIN ======================
 if add_keychain:
+    # (je volledige keychain-code met de verbeterde afmetingen)
     highest_v = None
     highest_v_idx = None
     max_z = -float('inf')
