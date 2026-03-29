@@ -29,12 +29,14 @@ def test_blender():
 class BaseRequest(BaseModel):
     model_url: str
     size_cm: int
+    order_nr: str  # Toegevoegd voor de bestandsnaam
     text: str = ""
     add_base: bool = True
     add_keychain: bool = False
 
 @app.post("/add-base")
 async def add_base(request: BaseRequest):
+    # Validatie van de input
     if request.size_cm not in [6, 8, 10]:
         raise HTTPException(status_code=400, detail="size_cm moet 6, 8 of 10 zijn")
 
@@ -43,7 +45,7 @@ async def add_base(request: BaseRequest):
         input_glb = tmp_path / "input.glb"
         output_obj = tmp_path / "output.obj"
 
-        # Download model
+        # 1. Download model
         try:
             async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                 response = await client.get(request.model_url)
@@ -56,12 +58,12 @@ async def add_base(request: BaseRequest):
         with open(input_glb, "wb") as f:
             f.write(content)
 
-        print(f"Input file downloaded, size: {len(content)} bytes")
-        print(f"Parameters: size_cm={request.size_cm}, text='{request.text}'")
-
+        print(f"Input file downloaded for order {request.order_nr}, size: {len(content)} bytes")
+        
+        # Tekst afhandeling voor Blender
         text_arg = request.text if request.text.strip() else "--NO-TEXT--"
 
-        # Blender aanroepen
+        # 2. Blender aanroepen met XVFB (headless display)
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
@@ -72,34 +74,31 @@ async def add_base(request: BaseRequest):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
-            print("Blender stdout:")
-            print(result.stdout)
-            print("Blender stderr:")
-            print(result.stderr)
-            print(f"Return code: {result.returncode}")
-
             if result.returncode != 0 or not output_obj.exists():
+                print("Blender Error Output:", result.stderr)
                 raise HTTPException(status_code=500, detail="Blender verwerking mislukt")
 
-            print("SUCCESS: output.obj created")
-
-            # === NETTE ZIP MAKEN ===
+            # 3. ZIP bestand genereren
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in tmp_path.iterdir():
-                    if file_path.is_file() and file_path.suffix.lower() in ['.obj', '.mtl', '.png']:
-                        # Schone namen: model.obj, model.mtl, model.png
+                    # Pak alle relevante output bestanden (.obj, .mtl en textures)
+                    if file_path.is_file() and file_path.suffix.lower() in ['.obj', '.mtl', '.png', '.jpg']:
                         clean_name = "model" + file_path.suffix.lower()
                         zipf.write(file_path, arcname=clean_name)
 
             zip_buffer.seek(0)
             zip_data = zip_buffer.read()
 
+            # Dynamische bestandsnaam samenstellen
+            export_filename = f"3DModel_{request.order_nr}.zip"
+
+            # 4. ZIP terugsturen naar de gebruiker
             return Response(
                 content=zip_data,
                 media_type="application/zip",
                 headers={
-                    "Content-Disposition": 'attachment; filename="figurine_with_base.zip"'
+                    "Content-Disposition": f'attachment; filename="{export_filename}"'
                 }
             )
 
