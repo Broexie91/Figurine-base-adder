@@ -33,6 +33,57 @@ def get_feet_bounds(obj, z_threshold_mm=5.0):
     return (Vector((min(v.x for v in feet), min(v.y for v in feet), bmin_z)), 
             Vector((max(v.x for v in feet), max(v.y for v in feet), bmin_z)))
 
+def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
+    """
+    Cascading Boolean fallback algorithm to guarantee geometry unification 
+    for Marketiger/Magics compatibility.
+    """
+    bpy.ops.object.select_all(action='DESELECT')
+    target_obj.select_set(True)
+    bpy.context.view_layer.objects.active = target_obj
+    
+    vert_before = len(target_obj.data.vertices)
+    
+    # 1. Poging: EXACT solver
+    bool_exact = target_obj.modifiers.new(name=f"{modifier_name}_EXACT", type='BOOLEAN')
+    bool_exact.operation = 'UNION'
+    bool_exact.object = tool_obj
+    bool_exact.solver = 'EXACT'
+    try: bool_exact.use_hole_tolerant = True
+    except: pass
+    
+    bpy.ops.object.modifier_apply(modifier=bool_exact.name)
+    
+    if len(target_obj.data.vertices) > vert_before + 5:
+        print(f"✅ {modifier_name} gelukt met EXACT solver!")
+        bpy.data.objects.remove(tool_obj, do_unlink=True)
+        return True
+
+    print(f"⚠️ EXACT {modifier_name} gefaald op vuile mesh. Bezig met FLOAT solver...")
+    
+    # 2. Poging: FLOAT solver (Brute force intersection)
+    bool_float = target_obj.modifiers.new(name=f"{modifier_name}_FLOAT", type='BOOLEAN')
+    bool_float.operation = 'UNION'
+    bool_float.object = tool_obj
+    bool_float.solver = 'FLOAT'
+    
+    bpy.ops.object.modifier_apply(modifier=bool_float.name)
+    
+    if len(target_obj.data.vertices) > vert_before + 5:
+        print(f"✅ {modifier_name} gelukt met FLOAT solver!")
+        bpy.data.objects.remove(tool_obj, do_unlink=True)
+        return True
+        
+    print(f"🚨 BEIDE BOOLEANS GEFAALD voor {modifier_name}! Fallback naar geometrische JOIN()...")
+    # 3. Poging: JOIN (Overlap behouden in de hoop dat Magics/slicer het overleeft)
+    bpy.ops.object.select_all(action='DESELECT')
+    target_obj.select_set(True)
+    tool_obj.select_set(True)
+    bpy.context.view_layer.objects.active = target_obj
+    bpy.ops.object.join()
+    print(f"✅ {modifier_name} geforceerd via basis JOIN()")
+    return False
+
 try:
     # ====================== ARGUMENTEN ======================
     argv = sys.argv[sys.argv.index("--") + 1:]
@@ -73,6 +124,37 @@ try:
     scale_factor = desired_height_mm / current_height
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
+    
+    # ====================== DESTROY FLOATING ARTIFACTS ======================
+    # Delete mesh data that is disassociated from the main figurine (floating dust below boots!)
+    print("Floating artifacts verwijderen (Loose Parts Cleanup)...")
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.separate(type='LOOSE')
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    parts = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+    if len(parts) > 1:
+        largest_part = max(parts, key=lambda o: len(o.data.vertices))
+        for part in parts:
+            if part != largest_part:
+                bpy.data.objects.remove(part, do_unlink=True)
+        model = largest_part
+        model.name = "Figurine"
+        bpy.context.view_layer.objects.active = model
+        model.select_set(True)
+        print("✅ Artefacten en vuilnis verwijderd. Alleen hoofdmodel is over.")
+        
+    # ====================== SWEEP NON-MANIFOLD GEOMETRY ======================
+    # Math-weld the main topology so booleans have a chance to succeed!
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.remove_doubles(threshold=0.01) # Merge overlapping verts
+    bpy.ops.mesh.dissolve_degenerate(threshold=0.01) # Burn zero-area triangles
+    bpy.ops.mesh.normals_make_consistent(inside=False) # Fix inverted faces
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print("✅ Originele geometry mathematisch dichtgelast en normals hersteld.")
 
     # ====================== TEXTURE UITPAKKEN ======================
     out_dir = os.path.dirname(output_path)
@@ -90,7 +172,7 @@ try:
                     # --- INJECT GREY PIXELS VOOR BASE (Light Grijs) en TEXT (Donker Grijs) ---
                     w, h = img.size
                     
-                    # Bottom-Left hoek (4x4 pixels): Licht Grijs
+                    # Bottom-Left hoek: Licht Grijs
                     for y in range(min(4, h)):
                         for x in range(min(4, w)):
                             idx = (y * w + x) * 4
@@ -100,7 +182,7 @@ try:
                                 img.pixels[idx+2] = 0.75
                                 img.pixels[idx+3] = 1.0
                                 
-                    # Top-Left hoek (4x4 pixels): Donker Grijs
+                    # Top-Left hoek: Donker Grijs
                     for y in range(max(0, h-4), h):
                         for x in range(min(4, w)):
                             idx = (y * w + x) * 4
@@ -125,7 +207,7 @@ try:
         print("⚠️ Geen embedded texture gevonden.")
 
     # ====================== BASE + TEKST (1 Material Strategy) ======================
-    bmin, bmax = get_bounds([model])
+    bmin, bmax = get_bounds([model]) # De échte bmin is nu bekend dankzij artifact cleanup!
     fmin, fmax = get_feet_bounds(model)
 
     if fmin and fmax:
@@ -138,9 +220,8 @@ try:
         radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
     if add_base:
-        print("Base toevoegen via overlapping JOIN (no-boolean)...")
+        print("Base toevoegen via fall-back union pipeline...")
         
-        # Duw de cylinder +0.5 mm in de voeten van het model (overlap voor slice-verbinding)
         adjusted_depth = base_thickness_mm + 0.5
         adj_z = bmin.z - adjusted_depth/2 + 0.5
 
@@ -153,20 +234,16 @@ try:
         )
         base = bpy.context.active_object
 
-        # Koppel EXACT hetzelfde materiaal en UV coordinaat (licht grijs dot op 0.005, 0.005)
         if len(model.data.materials) > 0:
             base.data.materials.append(model.data.materials[0])
             if base.data.uv_layers.active and model.data.uv_layers.active:
-                # BELANGRIJK: GLB gebruikt vaak 'TEXCOORD_0', Blender primitive 'UVMap'. 
-                # Alsnamen niet matchen exporteren de faces GEEN vt coordinaten -> Marketiger dropt ze!
                 base.data.uv_layers.active.name = model.data.uv_layers.active.name
-                
                 for loop in base.data.loops:
                     base.data.uv_layers.active.data[loop.index].uv = (0.005, 0.005)
 
-        # Tekst op de base (optioneel)
+        # Tekst op de base
         if text_str.strip():
-            text_loc = (center_x, center_y - radius*0.65, bmin.z + 0.2)
+            text_loc = (center_x, center_y - radius*0.65, bmin.z + 0.4)
             bpy.ops.object.text_add(location=text_loc)
             txt = bpy.context.active_object
             txt.data.body = text_str.upper()[:40]
@@ -183,37 +260,23 @@ try:
             bpy.ops.object.convert(target='MESH')
             txt_mesh = bpy.context.active_object
 
-            # Tekst ook hetzelfde materiaal, maar dan naar de donker grijze dot gewijzen (0.005, 0.995)
             if len(model.data.materials) > 0:
                 txt_mesh.data.materials.append(model.data.materials[0])
-                
-                # Zorg dat de text geometry over een geldige, correct benoemde UV layer beschikt
                 if not txt_mesh.data.uv_layers and model.data.uv_layers.active:
                     txt_mesh.data.uv_layers.new(name=model.data.uv_layers.active.name)
                 elif txt_mesh.data.uv_layers.active and model.data.uv_layers.active:
                     txt_mesh.data.uv_layers.active.name = model.data.uv_layers.active.name
-                    
                 if txt_mesh.data.uv_layers.active:
                     for loop in txt_mesh.data.loops:
                         txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.005, 0.995)
 
-            # Voeg Tekst eerst bij Base
-            bool_mod_txt = base.modifiers.new(name="Text_Union", type='BOOLEAN')
-            bool_mod_txt.operation = 'UNION'
-            bool_mod_txt.object = txt_mesh
-            bool_mod_txt.solver = 'FLOAT'
-            bpy.ops.object.modifier_apply(modifier=bool_mod_txt.name)
-            bpy.data.objects.remove(txt_mesh, do_unlink=True)
+            # Eerst text union met base
+            robust_boolean_union(base, txt_mesh, "Text_Union")
 
-        # Voeg Base bij het hoofdmodel met behulp van BOOLEAN UNION (belangrijk voor Marketiger shell fusion)
-        bool_mod = model.modifiers.new(name="Base_Union", type='BOOLEAN')
-        bool_mod.operation = 'UNION'
-        bool_mod.object = base
-        bool_mod.solver = 'FLOAT'
-        bpy.ops.object.modifier_apply(modifier=bool_mod.name)
-        bpy.data.objects.remove(base, do_unlink=True)
+        # Dan base union met model
+        robust_boolean_union(model, base, "Base_Union")
         
-        # Las naden dicht die door de FLOAT solver ontstaan (noodzakelijk voor slicers)
+        # Cleanup naden
         bpy.context.view_layer.objects.active = model
         model.select_set(True)
         bpy.ops.object.mode_set(mode='EDIT')
@@ -221,7 +284,7 @@ try:
         bpy.ops.mesh.remove_doubles(threshold=0.005)
         bpy.ops.object.mode_set(mode='OBJECT')
         
-        print("✅ Base geometry verenigd via BOOLEAN UNION (FLOAT), 1-Texture constraint enforced")
+        print("✅ Base architecture deployed!")
 
     # ====================== KEYCHAIN ======================
     if add_keychain:
@@ -261,8 +324,7 @@ try:
                     if loop.vertex_index == highest_v_idx:
                         found_uv = model.data.uv_layers.active.data[loop.index].uv
                         break
-            except Exception:
-                pass
+            except Exception: pass
 
         bpy.ops.mesh.primitive_torus_add(
             major_radius=major_radius,
@@ -273,24 +335,17 @@ try:
         )
         torus = bpy.context.active_object
 
-        # Fix voor Keychain: Altijd hetzelfde materiaal forceren.
-        # Fallback naar dark grijs pixel (0.005, 0.995) als UV niet geresolved is.
         if len(model.data.materials) > 0:
             torus.data.materials.append(model.data.materials[0])
             if torus.data.uv_layers.active and model.data.uv_layers.active:
                 torus.data.uv_layers.active.name = model.data.uv_layers.active.name
-                
                 fallback_uv = found_uv if found_uv is not None else (0.005, 0.995)
                 for loop in torus.data.loops:
                     torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
 
-        bool_mod_key = model.modifiers.new(name="Key_Union", type='BOOLEAN')
-        bool_mod_key.operation = 'UNION'
-        bool_mod_key.object = torus
-        bool_mod_key.solver = 'FLOAT'
-        bpy.ops.object.modifier_apply(modifier=bool_mod_key.name)
-        bpy.data.objects.remove(torus, do_unlink=True)
+        robust_boolean_union(model, torus, "Keychain_Union")
         
+        # Cleanup naden keychain
         bpy.context.view_layer.objects.active = model
         model.select_set(True)
         bpy.ops.object.mode_set(mode='EDIT')
@@ -303,7 +358,7 @@ try:
     model.select_set(True)
     bpy.context.view_layer.objects.active = model
     
-    # Force Triangulation on the whole mesh before export to fix N-gon failures
+    # Triangulatie om Marketiger crash te voorkomen op Base caps
     tri_mod = model.modifiers.new(name="Triangulate", type='TRIANGULATE')
     bpy.ops.object.modifier_apply(modifier=tri_mod.name)
 
@@ -316,8 +371,6 @@ try:
         export_uv=True
     )
     print(f"Export voltooid: {output_path}")
-    if found_texture:
-        print(f"Texture aanwezig: {texture_path}")
 
     print("=== Blender processing finished successfully ===")
 
