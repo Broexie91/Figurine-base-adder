@@ -124,37 +124,6 @@ try:
     scale_factor = desired_height_mm / current_height
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
-    
-    # ====================== DESTROY FLOATING ARTIFACTS ======================
-    # Delete mesh data that is disassociated from the main figurine (floating dust below boots!)
-    print("Floating artifacts verwijderen (Loose Parts Cleanup)...")
-    bpy.context.view_layer.objects.active = model
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.separate(type='LOOSE')
-    bpy.ops.object.mode_set(mode='OBJECT')
-    
-    parts = [o for o in bpy.context.selected_objects if o.type == 'MESH']
-    if len(parts) > 1:
-        largest_part = max(parts, key=lambda o: len(o.data.vertices))
-        for part in parts:
-            if part != largest_part:
-                bpy.data.objects.remove(part, do_unlink=True)
-        model = largest_part
-        model.name = "Figurine"
-        bpy.context.view_layer.objects.active = model
-        model.select_set(True)
-        print("✅ Artefacten en vuilnis verwijderd. Alleen hoofdmodel is over.")
-        
-    # ====================== SWEEP NON-MANIFOLD GEOMETRY ======================
-    # Math-weld the main topology so booleans have a chance to succeed!
-    bpy.context.view_layer.objects.active = model
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.remove_doubles(threshold=0.01) # Merge overlapping verts
-    bpy.ops.mesh.dissolve_degenerate(threshold=0.01) # Burn zero-area triangles
-    bpy.ops.mesh.normals_make_consistent(inside=False) # Fix inverted faces
-    bpy.ops.object.mode_set(mode='OBJECT')
-    print("✅ Originele geometry mathematisch dichtgelast en normals hersteld.")
 
     # ====================== TEXTURE UITPAKKEN ======================
     out_dir = os.path.dirname(output_path)
