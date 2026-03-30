@@ -86,6 +86,32 @@ try:
                 if node.type == 'TEX_IMAGE' and node.image:
                     img = node.image
                     print(f"Texture gevonden: {img.name} ({img.size[0]}x{img.size[1]})")
+                    
+                    # --- INJECT GREY PIXELS VOOR BASE (Light Grijs) en TEXT (Donker Grijs) ---
+                    w, h = img.size
+                    
+                    # Bottom-Left hoek (4x4 pixels): Licht Grijs
+                    for y in range(min(4, h)):
+                        for x in range(min(4, w)):
+                            idx = (y * w + x) * 4
+                            if idx + 3 < len(img.pixels):
+                                img.pixels[idx] = 0.75
+                                img.pixels[idx+1] = 0.75
+                                img.pixels[idx+2] = 0.75
+                                img.pixels[idx+3] = 1.0
+                                
+                    # Top-Left hoek (4x4 pixels): Donker Grijs
+                    for y in range(max(0, h-4), h):
+                        for x in range(min(4, w)):
+                            idx = (y * w + x) * 4
+                            if idx + 3 < len(img.pixels):
+                                img.pixels[idx] = 0.15
+                                img.pixels[idx+1] = 0.15
+                                img.pixels[idx+2] = 0.15
+                                img.pixels[idx+3] = 1.0
+                                
+                    img.update()
+                    
                     img.filepath_raw = texture_path
                     img.file_format = 'PNG'
                     img.save()
@@ -98,7 +124,7 @@ try:
     if not found_texture:
         print("⚠️ Geen embedded texture gevonden.")
 
-    # ====================== BASE + TEKST (licht grijs + Boolean Union) ======================
+    # ====================== BASE + TEKST (1 Material Strategy) ======================
     bmin, bmax = get_bounds([model])
     fmin, fmax = get_feet_bounds(model)
 
@@ -112,56 +138,31 @@ try:
         radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
     if add_base:
-        print("Base toevoegen (licht grijs) en vastmaken met Boolean Union...")
+        print("Base toevoegen via overlapping JOIN (no-boolean)...")
+        
+        # Duw de cylinder +0.5 mm in de voeten van het model (overlap voor slice-verbinding)
+        adjusted_depth = base_thickness_mm + 0.5
+        adj_z = bmin.z - adjusted_depth/2 + 0.5
+
         bpy.ops.mesh.primitive_cylinder_add(
             vertices=64, 
             radius=radius, 
-            depth=base_thickness_mm,
-            location=(center_x, center_y, bmin.z - base_thickness_mm/2)
+            depth=adjusted_depth,
+            location=(center_x, center_y, adj_z),
+            calc_uvs=True
         )
         base = bpy.context.active_object
 
-        # Licht grijs materiaal voor de base
-        base_mat = bpy.data.materials.new("BaseMat")
-        base_mat.use_nodes = True
-        bsdf = base_mat.node_tree.nodes["Principled BSDF"]
-        bsdf.inputs[0].default_value = (0.75, 0.75, 0.75, 1.0) # licht grijs
-        base.data.materials.append(base_mat)
-
-        # Boolean Union
-        bpy.ops.object.select_all(action='DESELECT')
-        model.select_set(True)
-        base.select_set(True)
-        bpy.context.view_layer.objects.active = model
-
-        bool_mod = model.modifiers.new(name="Base_Union", type='BOOLEAN')
-        bool_mod.operation = 'UNION'
-        bool_mod.object = base
-        bpy.ops.object.modifier_apply(modifier=bool_mod.name)
-
-        # Verwijder losse base
-        bpy.data.objects.remove(base, do_unlink=True)
-
-        # Expliciet lichtgrijs materiaal toewijzen aan de base-faces
-        if base_mat.name not in model.data.materials:
-            model.data.materials.append(base_mat)
-        
-        base_mat_index = model.data.materials.find(base_mat.name)
-
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='DESELECT')
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        mesh = model.data
-        for face in mesh.polygons:
-            face_center_z = sum((model.matrix_world @ mesh.vertices[i].co).z for i in face.vertices) / len(face.vertices)
-            if face_center_z < bmin.z + 0.2: # faces die bij de base horen
-                face.material_index = base_mat_index
-        print("✅ Base heeft nu expliciet lichtgrijs materiaal")
+        # Koppel EXACT hetzelfde materiaal en UV coordinaat (licht grijs dot op 0.005, 0.005)
+        if len(model.data.materials) > 0:
+            base.data.materials.append(model.data.materials[0])
+            if base.data.uv_layers.active:
+                for loop in base.data.loops:
+                    base.data.uv_layers.active.data[loop.index].uv = (0.005, 0.005)
 
         # Tekst op de base (optioneel)
         if text_str.strip():
-            text_loc = (center_x, center_y - radius*0.65, bmin.z)
+            text_loc = (center_x, center_y - radius*0.65, bmin.z + 0.2)
             bpy.ops.object.text_add(location=text_loc)
             txt = bpy.context.active_object
             txt.data.body = text_str.upper()[:40]
@@ -178,19 +179,33 @@ try:
             bpy.ops.object.convert(target='MESH')
             txt_mesh = bpy.context.active_object
 
-            tmat = bpy.data.materials.new("TextMat")
-            tmat.use_nodes = True
-            tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
-            txt_mesh.data.materials.append(tmat)
+            # Tekst ook hetzelfde materiaal, maar dan naar de donker grijze dot gewijzen (0.005, 0.995)
+            if len(model.data.materials) > 0:
+                txt_mesh.data.materials.append(model.data.materials[0])
+                if txt_mesh.data.uv_layers.active:
+                    for loop in txt_mesh.data.loops:
+                        txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.005, 0.995)
 
+            # Voeg Tekst eerst bij Base
             bpy.ops.object.select_all(action='DESELECT')
-            model.select_set(True)
+            base.select_set(True)
             txt_mesh.select_set(True)
-            bpy.context.view_layer.objects.active = model
+            bpy.context.view_layer.objects.active = base
             bpy.ops.object.join()
+            base = bpy.context.active_object
 
-    # ====================== KEYCHAIN (volledig behouden) ======================
+        # Voeg Base bij het hoofdmodel (overlapping geometry, geen destructive boolean)
+        bpy.ops.object.select_all(action='DESELECT')
+        model.select_set(True)
+        base.select_set(True)
+        bpy.context.view_layer.objects.active = model
+        bpy.ops.object.join()
+        
+        print("✅ Base geometry joined met object, 1-Texture constraint enforced")
+
+    # ====================== KEYCHAIN ======================
     if add_keychain:
+        print("Keychain toevoegen...")
         highest_v = None
         highest_v_idx = None
         max_z = -float('inf')
@@ -215,33 +230,17 @@ try:
             keychain_x = highest_v.x
             keychain_y = highest_v.y
 
-        # Verbeterde ring-afmetingen
         major_radius = 4.75
         minor_radius = 1.15
         sink_depth = 0.7
-        torus_color = (0.5, 0.5, 0.5, 1.0)
         found_uv = None
 
         if highest_v_idx is not None and model.data.uv_layers.active and len(model.data.materials) > 0:
             try:
                 for loop in model.data.loops:
                     if loop.vertex_index == highest_v_idx:
-                        uv = model.data.uv_layers.active.data[loop.index].uv
-                        found_uv = uv
+                        found_uv = model.data.uv_layers.active.data[loop.index].uv
                         break
-                if found_uv:
-                    mat = model.data.materials[0]
-                    if mat and mat.use_nodes:
-                        for node in mat.node_tree.nodes:
-                            if node.type == 'TEX_IMAGE' and node.image:
-                                img = node.image
-                                w, h = img.size
-                                x = max(0, min(w-1, int((uv.x % 1.0) * w)))
-                                y = max(0, min(h-1, int((uv.y % 1.0) * h)))
-                                idx = (y * w + x) * 4
-                                if idx + 3 < len(img.pixels):
-                                    torus_color = tuple(img.pixels[idx:idx+4])
-                                break
             except Exception:
                 pass
 
@@ -254,16 +253,14 @@ try:
         )
         torus = bpy.context.active_object
 
-        if found_uv is not None and len(model.data.materials) > 0:
+        # Fix voor Keychain: Altijd hetzelfde materiaal forceren.
+        # Fallback naar dark grijs pixel (0.005, 0.995) als UV niet geresolved is.
+        if len(model.data.materials) > 0:
             torus.data.materials.append(model.data.materials[0])
             if torus.data.uv_layers.active:
+                fallback_uv = found_uv if found_uv is not None else (0.005, 0.995)
                 for loop in torus.data.loops:
-                    torus.data.uv_layers.active.data[loop.index].uv = found_uv
-        else:
-            tmat = bpy.data.materials.new("RingMat")
-            tmat.use_nodes = True
-            tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = torus_color
-            torus.data.materials.append(tmat)
+                    torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
 
         bpy.ops.object.select_all(action='DESELECT')
         model.select_set(True)
@@ -284,7 +281,8 @@ try:
         export_uv=True
     )
     print(f"Export voltooid: {output_path}")
-    print(f"Texture aanwezig: {texture_path}")
+    if found_texture:
+        print(f"Texture aanwezig: {texture_path}")
 
     print("=== Blender processing finished successfully ===")
 
