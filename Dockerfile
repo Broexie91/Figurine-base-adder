@@ -1,9 +1,9 @@
 FROM ubuntu:24.04
 
-# Voorkom interactieve prompts tijdens installatie
+# Voorkom interactieve prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# === Systeem packages installeren (inclusief extra libs voor Blender 5.1) ===
+# === Systeem packages (nu met xz-utils!) ===
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -18,9 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi6 \
     libxext6 \
     wget \
+    xz-utils \          # ←←← DIT WAS HET PROBLEEM
     && rm -rf /var/lib/apt/lists/*
 
-# === Officiële Blender 5.1 installeren (veel stabieler in headless mode) ===
+# === Officiële Blender 5.1 installeren ===
 ARG BLENDER_VERSION=5.1.0
 RUN wget -q https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/blender-${BLENDER_VERSION}-linux-x64.tar.xz -O /tmp/blender.tar.xz && \
     mkdir -p /opt/blender && \
