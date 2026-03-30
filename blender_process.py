@@ -270,6 +270,11 @@ try:
     # ====================== EXPORT ======================
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    
+    # Force Triangulation on the whole mesh before export to fix N-gon failures
+    tri_mod = model.modifiers.new(name="Triangulate", type='TRIANGULATE')
+    bpy.ops.object.modifier_apply(modifier=tri_mod.name)
 
     print("Exporteren naar OBJ + MTL...")
     bpy.ops.wm.obj_export(
@@ -277,8 +282,7 @@ try:
         export_selected_objects=True,
         export_materials=True,
         path_mode='COPY',
-        export_uv=True,
-        export_triangulated=True
+        export_uv=True
     )
     print(f"Export voltooid: {output_path}")
     if found_texture:
