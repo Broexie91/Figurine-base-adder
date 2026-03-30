@@ -214,6 +214,8 @@ try:
         bpy.data.objects.remove(base, do_unlink=True)
         
         # Las naden dicht die door de FLOAT solver ontstaan (noodzakelijk voor slicers)
+        bpy.context.view_layer.objects.active = model
+        model.select_set(True)
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.mesh.remove_doubles(threshold=0.005)
@@ -289,6 +291,8 @@ try:
         bpy.ops.object.modifier_apply(modifier=bool_mod_key.name)
         bpy.data.objects.remove(torus, do_unlink=True)
         
+        bpy.context.view_layer.objects.active = model
+        model.select_set(True)
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.mesh.remove_doubles(threshold=0.005)
