@@ -201,6 +201,7 @@ try:
             bool_mod_txt = base.modifiers.new(name="Text_Union", type='BOOLEAN')
             bool_mod_txt.operation = 'UNION'
             bool_mod_txt.object = txt_mesh
+            bool_mod_txt.solver = 'FAST'
             bpy.ops.object.modifier_apply(modifier=bool_mod_txt.name)
             bpy.data.objects.remove(txt_mesh, do_unlink=True)
 
@@ -208,10 +209,17 @@ try:
         bool_mod = model.modifiers.new(name="Base_Union", type='BOOLEAN')
         bool_mod.operation = 'UNION'
         bool_mod.object = base
+        bool_mod.solver = 'FAST'
         bpy.ops.object.modifier_apply(modifier=bool_mod.name)
         bpy.data.objects.remove(base, do_unlink=True)
         
-        print("✅ Base geometry verenigd via BOOLEAN UNION, 1-Texture constraint enforced")
+        # Las naden dicht die door de FAST solver ontstaan (noodzakelijk voor slicers)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.remove_doubles(threshold=0.005)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        print("✅ Base geometry verenigd via BOOLEAN UNION (FAST), 1-Texture constraint enforced")
 
     # ====================== KEYCHAIN ======================
     if add_keychain:
@@ -277,8 +285,14 @@ try:
         bool_mod_key = model.modifiers.new(name="Key_Union", type='BOOLEAN')
         bool_mod_key.operation = 'UNION'
         bool_mod_key.object = torus
+        bool_mod_key.solver = 'FAST'
         bpy.ops.object.modifier_apply(modifier=bool_mod_key.name)
         bpy.data.objects.remove(torus, do_unlink=True)
+        
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.remove_doubles(threshold=0.005)
+        bpy.ops.object.mode_set(mode='OBJECT')
 
     # ====================== EXPORT ======================
     bpy.ops.object.select_all(action='DESELECT')
