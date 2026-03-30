@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 # Voorkom interactieve prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# === Systeem packages (nu met xz-utils!) ===
+# Systeem packages + xz-utils (nodig voor Blender .tar.xz)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi6 \
     libxext6 \
     wget \
-    xz-utils \          # ←←← DIT WAS HET PROBLEEM
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# === Officiële Blender 5.1 installeren ===
+# Officiële Blender 5.1 installeren (stabiel in headless mode)
 ARG BLENDER_VERSION=5.1.0
 RUN wget -q https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/blender-${BLENDER_VERSION}-linux-x64.tar.xz -O /tmp/blender.tar.xz && \
     mkdir -p /opt/blender && \
@@ -29,21 +29,20 @@ RUN wget -q https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/bl
     ln -s /opt/blender/blender /usr/local/bin/blender && \
     rm /tmp/blender.tar.xz
 
-# Blender headless instellingen
 ENV BLENDER_SYSTEM_PYTHON=1
 
-# === Werkdirectory en virtual environment ===
+# Werkdirectory en virtual environment
 WORKDIR /app
 
 RUN python3 -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
-# === Python dependencies ===
+# Python dependencies
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# === Je code kopiëren ===
+# Je code
 COPY main.py blender_process.py ./
 
 EXPOSE 8080
