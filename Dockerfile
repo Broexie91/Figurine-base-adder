@@ -1,29 +1,48 @@
 FROM ubuntu:24.04
 
-# Prevent interactive prompts during tzdata/apt-get
+# Voorkom interactieve prompts tijdens installatie
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python, pip, Blender, and Xvfb all from official Ubuntu repositories
-# This avoids extracting giant .tar.xz files which causes Out Of Memory on Hobby plans
+# === Systeem packages installeren (inclusief extra libs voor Blender 5.1) ===
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
-    blender \
     xvfb \
     python3-numpy \
+    libgl1 \
+    libglib2.0-0 \
+    libxrender1 \
+    libxkbcommon0 \
+    libsm6 \
+    libxi6 \
+    libxext6 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
+# === Officiële Blender 5.1 installeren (veel stabieler in headless mode) ===
+ARG BLENDER_VERSION=5.1.0
+RUN wget -q https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/blender-${BLENDER_VERSION}-linux-x64.tar.xz -O /tmp/blender.tar.xz && \
+    mkdir -p /opt/blender && \
+    tar -xJf /tmp/blender.tar.xz -C /opt/blender --strip-components=1 && \
+    ln -s /opt/blender/blender /usr/local/bin/blender && \
+    rm /tmp/blender.tar.xz
+
+# Blender headless instellingen
+ENV BLENDER_SYSTEM_PYTHON=1
+
+# === Werkdirectory en virtual environment ===
 WORKDIR /app
 
-# Create a virtual environment and add it to PATH
 RUN python3 -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
+# === Python dependencies ===
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# === Je code kopiëren ===
 COPY main.py blender_process.py ./
 
 EXPOSE 8080
