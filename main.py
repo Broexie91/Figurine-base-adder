@@ -75,8 +75,16 @@ async def add_base(request: BaseRequest):
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
             if result.returncode != 0 or not output_obj.exists():
-                print("Blender Error Output:", result.stderr)
-                raise HTTPException(status_code=500, detail="Blender verwerking mislukt")
+                print("Blender StdErr:", result.stderr)
+                print("Blender StdOut:", result.stdout)
+                
+                # Snip the last 1000 characters of stdout to return to the user if it exists
+                error_log = result.stdout[-1000:] if result.stdout else "No output"
+                
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Blender verwerking mislukt. Error log: {error_log}"
+                )
 
             # 3. ZIP bestand genereren
             zip_buffer = io.BytesIO()
