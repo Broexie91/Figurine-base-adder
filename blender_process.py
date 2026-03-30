@@ -96,40 +96,74 @@ for mat in bpy.data.materials:
 
 # ====================== BASE ======================
 if add_base:
-    print("Base toevoegen...")
+    print("Base toevoegen met Boolean Union + Voxel Remesh...")
     bmin, bmax = get_bounds(model)
     fmin, fmax = get_feet_bounds(model)
 
     if fmin and fmax:
         center_x = (fmin.x + fmax.x) / 2
         center_y = (fmin.y + fmax.y) / 2
-        radius = max(fmax.x - fmin.x, fmax.y - fmin.y) / 2 * 1.4
+        radius = max(fmax.x - fmin.x, fmax.y - fmin.y) / 2 * 1.45   # iets ruimer
     else:
         center_x = (bmin.x + bmax.x) / 2
         center_y = (bmin.y + bmax.y) / 2
-        radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 1.0
+        radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 1.05
 
-    bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
-                                        location=(center_x, center_y, bmin.z - base_thickness_mm/2 + 0.3))
+    # Cylinder maken met overlap
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=64,
+        radius=radius,
+        depth=base_thickness_mm,
+        location=(center_x, center_y, bmin.z - base_thickness_mm / 2 + 0.4)  # meer overlap
+    )
     base = bpy.context.active_object
 
+    # Licht grijs materiaal
     base_mat = bpy.data.materials.new("BaseMat")
     base_mat.use_nodes = True
     base_mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.75, 0.75, 0.75, 1.0)
     base.data.materials.append(base_mat)
 
-    # Veilige join
+    # === Boolean Union (dit maakt de base echt deel van het model) ===
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     base.select_set(True)
     bpy.context.view_layer.objects.active = model
-    with bpy.context.temp_override(active_object=model, selected_objects=[model, base]):
-        bpy.ops.object.join()
-    print("Base gejoind")
 
+    bool_mod = model.modifiers.new(name="BaseUnion", type='BOOLEAN')
+    bool_mod.operation = 'UNION'
+    bool_mod.object = base
+    bpy.ops.object.modifier_apply(modifier=bool_mod.name)
+
+    # Verwijder de losse base
+    bpy.data.objects.remove(base, do_unlink=True)
+    print("Boolean Union toegepast")
+
+    # === Extra cleanup + Voxel Remesh (maakt manifold en lost intersecting faces op) ===
     bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.remove_doubles(threshold=0.02)
+    bpy.ops.mesh.remove_doubles(threshold=0.015)
+    bpy.ops.mesh.dissolve_degenerate(threshold=0.01)
     bpy.ops.object.mode_set(mode='OBJECT')
+
+    remesh = model.modifiers.new(name="Remesh", type='VOXEL')
+    remesh.voxel_size = 0.35   # balans: niet te fijn (crash) maar wel schoon
+    bpy.ops.object.modifier_apply(modifier="Remesh")
+    print("Voxel Remesh toegepast")
+
+    # Base materiaal toewijzen aan onderste faces (ruimere marge na remesh)
+    bmin, bmax = get_bounds(model)  # opnieuw berekenen!
+    mesh = model.data
+    base_mat_index = model.data.materials.find("BaseMat")
+    if base_mat_index == -1:
+        model.data.materials.append(base_mat)
+        base_mat_index = len(model.data.materials) - 1
+
+    for face in mesh.polygons:
+        face_z = sum((model.matrix_world @ mesh.vertices[i].co).z for i in face.vertices) / len(face.vertices)
+        if face_z < bmin.z + 1.8:   # ruimere marge
+            face.material_index = base_mat_index
+
+    print("✅ Base verwerkt met Boolean + Remesh")
 
 # ====================== KEYCHAIN (terug!) ======================
 if add_keychain:
