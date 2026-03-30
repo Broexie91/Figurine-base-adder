@@ -156,7 +156,11 @@ try:
         # Koppel EXACT hetzelfde materiaal en UV coordinaat (licht grijs dot op 0.005, 0.005)
         if len(model.data.materials) > 0:
             base.data.materials.append(model.data.materials[0])
-            if base.data.uv_layers.active:
+            if base.data.uv_layers.active and model.data.uv_layers.active:
+                # BELANGRIJK: GLB gebruikt vaak 'TEXCOORD_0', Blender primitive 'UVMap'. 
+                # Alsnamen niet matchen exporteren de faces GEEN vt coordinaten -> Marketiger dropt ze!
+                base.data.uv_layers.active.name = model.data.uv_layers.active.name
+                
                 for loop in base.data.loops:
                     base.data.uv_layers.active.data[loop.index].uv = (0.005, 0.005)
 
@@ -182,6 +186,13 @@ try:
             # Tekst ook hetzelfde materiaal, maar dan naar de donker grijze dot gewijzen (0.005, 0.995)
             if len(model.data.materials) > 0:
                 txt_mesh.data.materials.append(model.data.materials[0])
+                
+                # Zorg dat de text geometry over een geldige, correct benoemde UV layer beschikt
+                if not txt_mesh.data.uv_layers and model.data.uv_layers.active:
+                    txt_mesh.data.uv_layers.new(name=model.data.uv_layers.active.name)
+                elif txt_mesh.data.uv_layers.active and model.data.uv_layers.active:
+                    txt_mesh.data.uv_layers.active.name = model.data.uv_layers.active.name
+                    
                 if txt_mesh.data.uv_layers.active:
                     for loop in txt_mesh.data.loops:
                         txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.005, 0.995)
@@ -256,7 +267,9 @@ try:
         # Fallback naar dark grijs pixel (0.005, 0.995) als UV niet geresolved is.
         if len(model.data.materials) > 0:
             torus.data.materials.append(model.data.materials[0])
-            if torus.data.uv_layers.active:
+            if torus.data.uv_layers.active and model.data.uv_layers.active:
+                torus.data.uv_layers.active.name = model.data.uv_layers.active.name
+                
                 fallback_uv = found_uv if found_uv is not None else (0.005, 0.995)
                 for loop in torus.data.loops:
                     torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
