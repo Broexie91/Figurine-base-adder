@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxi6 \
     libxext6 \
+    libxfixes3 \
+    libxxf86vm1 \
     wget \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
