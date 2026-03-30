@@ -187,21 +187,20 @@ try:
                         txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.005, 0.995)
 
             # Voeg Tekst eerst bij Base
-            bpy.ops.object.select_all(action='DESELECT')
-            base.select_set(True)
-            txt_mesh.select_set(True)
-            bpy.context.view_layer.objects.active = base
-            bpy.ops.object.join()
-            base = bpy.context.active_object
+            bool_mod_txt = base.modifiers.new(name="Text_Union", type='BOOLEAN')
+            bool_mod_txt.operation = 'UNION'
+            bool_mod_txt.object = txt_mesh
+            bpy.ops.object.modifier_apply(modifier=bool_mod_txt.name)
+            bpy.data.objects.remove(txt_mesh, do_unlink=True)
 
-        # Voeg Base bij het hoofdmodel (overlapping geometry, geen destructive boolean)
-        bpy.ops.object.select_all(action='DESELECT')
-        model.select_set(True)
-        base.select_set(True)
-        bpy.context.view_layer.objects.active = model
-        bpy.ops.object.join()
+        # Voeg Base bij het hoofdmodel met behulp van BOOLEAN UNION (belangrijk voor Marketiger shell fusion)
+        bool_mod = model.modifiers.new(name="Base_Union", type='BOOLEAN')
+        bool_mod.operation = 'UNION'
+        bool_mod.object = base
+        bpy.ops.object.modifier_apply(modifier=bool_mod.name)
+        bpy.data.objects.remove(base, do_unlink=True)
         
-        print("✅ Base geometry joined met object, 1-Texture constraint enforced")
+        print("✅ Base geometry verenigd via BOOLEAN UNION, 1-Texture constraint enforced")
 
     # ====================== KEYCHAIN ======================
     if add_keychain:
@@ -262,11 +261,11 @@ try:
                 for loop in torus.data.loops:
                     torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
 
-        bpy.ops.object.select_all(action='DESELECT')
-        model.select_set(True)
-        torus.select_set(True)
-        bpy.context.view_layer.objects.active = model
-        bpy.ops.object.join()
+        bool_mod_key = model.modifiers.new(name="Key_Union", type='BOOLEAN')
+        bool_mod_key.operation = 'UNION'
+        bool_mod_key.object = torus
+        bpy.ops.object.modifier_apply(modifier=bool_mod_key.name)
+        bpy.data.objects.remove(torus, do_unlink=True)
 
     # ====================== EXPORT ======================
     bpy.ops.object.select_all(action='DESELECT')
@@ -278,7 +277,8 @@ try:
         export_selected_objects=True,
         export_materials=True,
         path_mode='COPY',
-        export_uv=True
+        export_uv=True,
+        export_triangulated=True
     )
     print(f"Export voltooid: {output_path}")
     if found_texture:
