@@ -7,9 +7,10 @@ import addon_utils
 
 addon_utils.enable("object_print3d_utils")
 
+
 def get_bounds(objs):
-    bmin = Vector((float('inf'),)*3)
-    bmax = Vector((-float('inf'),)*3)
+    bmin = Vector((float('inf'),) * 3)
+    bmax = Vector((-float('inf'),) * 3)
     for obj in objs:
         for corner in obj.bound_box:
             v = obj.matrix_world @ Vector(corner)
@@ -17,15 +18,19 @@ def get_bounds(objs):
             bmax = Vector(max(a, b) for a, b in zip(bmax, v))
     return bmin, bmax
 
+
 def get_feet_bounds(obj, z_threshold_mm=5.0):
     mesh = obj.data
     verts = [obj.matrix_world @ v.co for v in mesh.vertices]
-    if not verts: return None, None
+    if not verts:
+        return None, None
     bmin_z = min(v.z for v in verts)
     feet = [v for v in verts if v.z <= bmin_z + z_threshold_mm]
-    if not feet: return None, None
+    if not feet:
+        return None, None
     return Vector((min(v.x for v in feet), min(v.y for v in feet), bmin_z)), \
            Vector((max(v.x for v in feet), max(v.y for v in feet), bmin_z))
+
 
 # ====================== ARGUMENTEN ======================
 argv = sys.argv[sys.argv.index("--") + 1:]
@@ -33,7 +38,8 @@ input_path = argv[0]
 output_path = argv[1]
 size_cm = float(argv[2])
 text_str = argv[3] if len(argv) > 3 else ""
-if text_str == "--NO-TEXT--": text_str = ""
+if text_str == "--NO-TEXT--":
+    text_str = ""
 add_base = argv[4].lower() == 'true' if len(argv) > 4 else True
 add_keychain = argv[5].lower() == 'true' if len(argv) > 5 else False
 
@@ -68,7 +74,6 @@ bpy.ops.object.transform_apply(scale=True)
 # ====================== TEXTURE UITPAKKEN ======================
 out_dir = os.path.dirname(output_path)
 texture_path = os.path.join(out_dir, "model.png")
-
 found_texture = False
 print("Zoeken naar embedded textures...")
 for mat in bpy.data.materials:
@@ -85,11 +90,10 @@ for mat in bpy.data.materials:
                 break
         if found_texture:
             break
-
 if not found_texture:
     print("⚠️ Geen embedded texture gevonden.")
 
-# ====================== BASE + TEKST (licht grijs + Boolean Union) ======================
+# ====================== BASE + TEKST ======================
 bmin, bmax = get_bounds([model])
 fmin, fmax = get_feet_bounds(model)
 
@@ -103,53 +107,60 @@ else:
     radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
 if add_base:
-    print("Base toevoegen (licht grijs) en vastmaken met Boolean Union...")
-
-    bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=radius, depth=base_thickness_mm,
-                                        location=(center_x, center_y, bmin.z - base_thickness_mm/2))
+    print("Base toevoegen (licht grijs) via Join + Voxel Remesh...")
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=64,
+        radius=radius,
+        depth=base_thickness_mm,
+        location=(center_x, center_y, bmin.z - base_thickness_mm / 2 + 0.15)  # lichte overlap
+    )
     base = bpy.context.active_object
 
-    # Licht grijs materiaal voor de base
+    # Licht grijs materiaal
     base_mat = bpy.data.materials.new("BaseMat")
     base_mat.use_nodes = True
     bsdf = base_mat.node_tree.nodes["Principled BSDF"]
-    bsdf.inputs[0].default_value = (0.75, 0.75, 0.75, 1.0)   # licht grijs
+    bsdf.inputs[0].default_value = (0.75, 0.75, 0.75, 1.0)
     base.data.materials.append(base_mat)
 
-    # Boolean Union
+    # Join i.p.v. Boolean
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     base.select_set(True)
     bpy.context.view_layer.objects.active = model
+    bpy.ops.object.join()
 
-    bool_mod = model.modifiers.new(name="Base_Union", type='BOOLEAN')
-    bool_mod.operation = 'UNION'
-    bool_mod.object = base
-    bpy.ops.object.modifier_apply(modifier=bool_mod.name)
+    # Cleanup
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.remove_doubles(threshold=0.01)
+    bpy.ops.object.mode_set(mode='OBJECT')
 
-    # Verwijder losse base
-    bpy.data.objects.remove(base, do_unlink=True)
+    # Voxel Remesh → dit maakt de mesh manifold en stabiel voor Marketiger
+    remesh = model.modifiers.new(name="Remesh", type='VOXEL')
+    remesh.voxel_size = 0.25  # Goede balans voor 8 cm chibi (kleiner = meer detail, groter = schoner)
+    bpy.ops.object.modifier_apply(modifier="Remesh")
 
-    # Expliciet lichtgrijs materiaal toewijzen aan de base-faces
-    if base_mat.name not in model.data.materials:
-        model.data.materials.append(base_mat)
-    base_mat_index = model.data.materials.find(base_mat.name)
-
+    # Materiaal toewijzen aan base-faces
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='DESELECT')
     bpy.ops.object.mode_set(mode='OBJECT')
 
     mesh = model.data
+    base_mat_index = model.data.materials.find("BaseMat")
+    if base_mat_index == -1:
+        model.data.materials.append(base_mat)
+        base_mat_index = len(model.data.materials) - 1
+
     for face in mesh.polygons:
-        face_center_z = sum((model.matrix_world @ mesh.vertices[i].co).z for i in face.vertices) / len(face.vertices)
-        if face_center_z < bmin.z + 0.2:   # faces die bij de base horen
+        face_z = sum((model.matrix_world @ mesh.vertices[i].co).z for i in face.vertices) / len(face.vertices)
+        if face_z < bmin.z + 1.0:   # ruimere marge na remesh
             face.material_index = base_mat_index
 
-    print("✅ Base heeft nu expliciet lichtgrijs materiaal")
+    print("✅ Base toegevoegd en gemerged met Remesh")
 
     # Tekst op de base (optioneel)
     if text_str.strip():
-        text_loc = (center_x, center_y - radius*0.65, bmin.z)
+        text_loc = (center_x, center_y - radius * 0.65, bmin.z)
         bpy.ops.object.text_add(location=text_loc)
         txt = bpy.context.active_object
         txt.data.body = text_str.upper()[:40]
@@ -163,18 +174,24 @@ if add_base:
             txt.data.size *= (radius * 1.4 / txt.dimensions.x)
         bpy.ops.object.convert(target='MESH')
         txt_mesh = bpy.context.active_object
+
         tmat = bpy.data.materials.new("TextMat")
         tmat.use_nodes = True
         tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.05, 0.05, 0.05, 1.0)
         txt_mesh.data.materials.append(tmat)
+
         bpy.ops.object.select_all(action='DESELECT')
         model.select_set(True)
         txt_mesh.select_set(True)
         bpy.context.view_layer.objects.active = model
         bpy.ops.object.join()
 
-# ====================== KEYCHAIN (volledig behouden) ======================
+        print("✅ Tekst toegevoegd aan base")
+
+# ====================== KEYCHAIN ======================
 if add_keychain:
+    print("Keychain toevoegen...")
+    # (je originele keychain-logica, alleen met betere cleanup na join)
     highest_v = None
     highest_v_idx = None
     max_z = -float('inf')
@@ -199,14 +216,13 @@ if add_keychain:
         keychain_x = highest_v.x
         keychain_y = highest_v.y
 
-    # Verbeterde ring-afmetingen
     major_radius = 4.75
     minor_radius = 1.15
     sink_depth = 0.7
-
     torus_color = (0.5, 0.5, 0.5, 1.0)
-    found_uv = None
 
+    # UV-kleur overnemen (jouw originele code)
+    found_uv = None
     if highest_v_idx is not None and model.data.uv_layers.active and len(model.data.materials) > 0:
         try:
             for loop in model.data.loops:
@@ -221,11 +237,11 @@ if add_keychain:
                         if node.type == 'TEX_IMAGE' and node.image:
                             img = node.image
                             w, h = img.size
-                            x = max(0, min(w-1, int((uv.x % 1.0) * w)))
-                            y = max(0, min(h-1, int((uv.y % 1.0) * h)))
+                            x = max(0, min(w - 1, int((uv.x % 1.0) * w)))
+                            y = max(0, min(h - 1, int((uv.y % 1.0) * h)))
                             idx = (y * w + x) * 4
                             if idx + 3 < len(img.pixels):
-                                torus_color = tuple(img.pixels[idx:idx+4])
+                                torus_color = tuple(img.pixels[idx:idx + 4])
                             break
         except Exception:
             pass
@@ -256,7 +272,15 @@ if add_keychain:
     bpy.context.view_layer.objects.active = model
     bpy.ops.object.join()
 
-# ====================== EXPORT ======================
+    # Cleanup na keychain
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.remove_doubles(threshold=0.01)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    print("✅ Keychain toegevoegd")
+
+# ====================== FINAL CLEANUP & EXPORT ======================
+print(f"Final model heeft {len(model.data.vertices)} vertices")
 bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
 
@@ -270,4 +294,4 @@ bpy.ops.wm.obj_export(
 )
 
 print(f"Export voltooid: {output_path}")
-print(f"Texture aanwezig: {texture_path}")
+print(f"Texture aanwezig: {texture_path if found_texture else 'geen'}")
