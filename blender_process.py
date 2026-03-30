@@ -37,7 +37,7 @@ desired_height_mm = size_cm * 10
 base_thickness_mm = 2.5
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
-print("=== Blender processing started ===")
+print("=== Blender 5.1 processing started ===")
 
 # ====================== IMPORT ======================
 print("Import GLB...")
@@ -70,7 +70,7 @@ print(f"Model geschaald naar {desired_height_mm:.1f} mm")
 
 # Cleanup na import
 bpy.ops.object.mode_set(mode='EDIT')
-bpy.ops.mesh.remove_doubles(threshold=0.02)
+bpy.ops.mesh.remove_doubles(threshold=0.015)
 bpy.ops.object.mode_set(mode='OBJECT')
 print("Doubles verwijderd na import")
 
@@ -94,7 +94,7 @@ for mat in bpy.data.materials:
                 break
         if found_texture: break
 
-# ====================== BASE ======================
+# ====================== BASE (Boolean + Voxel Remesh) ======================
 if add_base:
     print("Base toevoegen met Boolean Union + Voxel Remesh...")
     bmin, bmax = get_bounds(model)
@@ -103,55 +103,50 @@ if add_base:
     if fmin and fmax:
         center_x = (fmin.x + fmax.x) / 2
         center_y = (fmin.y + fmax.y) / 2
-        radius = max(fmax.x - fmin.x, fmax.y - fmin.y) / 2 * 1.45   # iets ruimer
+        radius = max(fmax.x - fmin.x, fmax.y - fmin.y) / 2 * 1.45
     else:
         center_x = (bmin.x + bmax.x) / 2
         center_y = (bmin.y + bmax.y) / 2
         radius = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 1.05
 
-    # Cylinder maken met overlap
     bpy.ops.mesh.primitive_cylinder_add(
         vertices=64,
         radius=radius,
         depth=base_thickness_mm,
-        location=(center_x, center_y, bmin.z - base_thickness_mm / 2 + 0.4)  # meer overlap
+        location=(center_x, center_y, bmin.z - base_thickness_mm/2 + 0.4)
     )
     base = bpy.context.active_object
 
-    # Licht grijs materiaal
     base_mat = bpy.data.materials.new("BaseMat")
     base_mat.use_nodes = True
     base_mat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.75, 0.75, 0.75, 1.0)
     base.data.materials.append(base_mat)
 
-    # === Boolean Union (dit maakt de base echt deel van het model) ===
+    # Boolean Union
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     base.select_set(True)
     bpy.context.view_layer.objects.active = model
-
     bool_mod = model.modifiers.new(name="BaseUnion", type='BOOLEAN')
     bool_mod.operation = 'UNION'
     bool_mod.object = base
     bpy.ops.object.modifier_apply(modifier=bool_mod.name)
-
-    # Verwijder de losse base
     bpy.data.objects.remove(base, do_unlink=True)
     print("Boolean Union toegepast")
 
-    # === Extra cleanup + Voxel Remesh (maakt manifold en lost intersecting faces op) ===
+    # Cleanup + Voxel Remesh (Blender 5.1 maakt dit nu stabiel)
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.remove_doubles(threshold=0.015)
     bpy.ops.mesh.dissolve_degenerate(threshold=0.01)
     bpy.ops.object.mode_set(mode='OBJECT')
 
     remesh = model.modifiers.new(name="Remesh", type='VOXEL')
-    remesh.voxel_size = 0.35   # balans: niet te fijn (crash) maar wel schoon
+    remesh.voxel_size = 0.35          # Goede balans voor 6-8 cm poppetjes
     bpy.ops.object.modifier_apply(modifier="Remesh")
     print("Voxel Remesh toegepast")
 
-    # Base materiaal toewijzen aan onderste faces (ruimere marge na remesh)
-    bmin, bmax = get_bounds(model)  # opnieuw berekenen!
+    # Materiaal toewijzen aan base-faces
+    bmin, bmax = get_bounds(model)
     mesh = model.data
     base_mat_index = model.data.materials.find("BaseMat")
     if base_mat_index == -1:
@@ -160,15 +155,15 @@ if add_base:
 
     for face in mesh.polygons:
         face_z = sum((model.matrix_world @ mesh.vertices[i].co).z for i in face.vertices) / len(face.vertices)
-        if face_z < bmin.z + 1.8:   # ruimere marge
+        if face_z < bmin.z + 1.8:
             face.material_index = base_mat_index
 
-    print("✅ Base verwerkt met Boolean + Remesh")
+    print("✅ Base succesvol verwerkt met Boolean + Remesh")
 
-# ====================== KEYCHAIN (terug!) ======================
+# ====================== KEYCHAIN ======================
 if add_keychain:
     print("Keychain toevoegen...")
-    bmin, bmax = get_bounds(model)  # update bounds
+    bmin, bmax = get_bounds(model)
     highest_v = None
     max_z = -float('inf')
     mesh = model.data
@@ -186,26 +181,20 @@ if add_keychain:
     keychain_x = highest_v.x if highest_v else center_x
     keychain_y = highest_v.y if highest_v else center_y
 
-    major_radius = 4.75
-    minor_radius = 1.15
-    sink_depth = 0.7
-
     bpy.ops.mesh.primitive_torus_add(
-        major_radius=major_radius,
-        minor_radius=minor_radius,
-        location=(keychain_x, keychain_y, keychain_z - sink_depth),
+        major_radius=4.75,
+        minor_radius=1.15,
+        location=(keychain_x, keychain_y, keychain_z - 0.7),
         rotation=(math.radians(90), 0, 0),
         generate_uvs=True
     )
     torus = bpy.context.active_object
 
-    # Simpele grijze ring als fallback
     tmat = bpy.data.materials.new("RingMat")
     tmat.use_nodes = True
     tmat.node_tree.nodes["Principled BSDF"].inputs[0].default_value = (0.5, 0.5, 0.5, 1.0)
     torus.data.materials.append(tmat)
 
-    # Veilige join
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     torus.select_set(True)
@@ -223,7 +212,7 @@ bpy.ops.object.select_all(action='DESELECT')
 model.select_set(True)
 bpy.context.view_layer.objects.active = model
 
-print(f"Exporteren — vertices: {len(model.data.vertices)}")
+print(f"Exporteren — final vertices: {len(model.data.vertices)}")
 
 try:
     bpy.ops.wm.obj_export(
@@ -239,4 +228,4 @@ except Exception as e:
     print(f"❌ Export error: {e}")
     raise
 
-print("Proces klaar")
+print("=== Blender processing finished successfully ===")
