@@ -303,31 +303,21 @@ try:
                     img = node.image
                     print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
 
-                    # Inject grey sentinel pixels for base (light grey) and text (dark grey)
+                    # Inject grey sentinel pixels using numpy — avoids copying 16M floats
+                    # into a Python list (which caused timeouts on 2048x2048 textures).
                     w, h = img.size
-                    pixels = list(img.pixels)
+                    import numpy as np
+                    px = np.empty(w * h * 4, dtype=np.float32)
+                    img.pixels.foreach_get(px)
+                    px = px.reshape(h, w, 4)
 
-                    # Bottom-left: light grey (base colour hint)
-                    for y in range(min(4, h)):
-                        for x in range(min(4, w)):
-                            idx = (y * w + x) * 4
-                            if idx + 3 < len(pixels):
-                                pixels[idx]     = 0.75
-                                pixels[idx + 1] = 0.75
-                                pixels[idx + 2] = 0.75
-                                pixels[idx + 3] = 1.0
+                    # Bottom-left 4×4: light grey (base colour hint)
+                    px[:min(4, h), :min(4, w)] = [0.75, 0.75, 0.75, 1.0]
 
-                    # Top-left: dark grey (text colour hint)
-                    for y in range(max(0, h - 4), h):
-                        for x in range(min(4, w)):
-                            idx = (y * w + x) * 4
-                            if idx + 3 < len(pixels):
-                                pixels[idx]     = 0.15
-                                pixels[idx + 1] = 0.15
-                                pixels[idx + 2] = 0.15
-                                pixels[idx + 3] = 1.0
+                    # Top-left 4×4: dark grey (text colour hint)
+                    px[max(0, h - 4):h, :min(4, w)] = [0.15, 0.15, 0.15, 1.0]
 
-                    img.pixels[:] = pixels
+                    img.pixels.foreach_set(px.ravel())
                     img.update()
                     img.filepath_raw = texture_path
                     img.file_format = 'PNG'
