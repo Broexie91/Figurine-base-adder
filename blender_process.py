@@ -206,8 +206,12 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
                 pass
         bpy.ops.object.modifier_apply(modifier=mod.name)
         new_verts = len(target_obj.data.vertices)
-        success = new_verts > vert_before + 5
-        print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ no change'}")
+        
+        # A successful boolean union often DECREASES vertex count because
+        # dense interior geometry (like feet inside a base) gets deleted.
+        # If it silently fails, the vertex count will remain exactly the same.
+        success = new_verts != vert_before
+        print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ silent failure'}")
         return success
 
     # --- Attempt 1: EXACT ---
