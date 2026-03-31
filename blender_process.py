@@ -7,7 +7,21 @@ import bmesh
 from mathutils import Vector
 import addon_utils
 
-addon_utils.enable("object_print3d_utils")
+# Enable 3D Print Toolbox if available — it ships with Blender but must be
+# explicitly enabled in headless/Docker environments via the Dockerfile build step.
+# If it's missing, all operations degrade gracefully to bmesh fallbacks.
+_print3d_available = False
+try:
+    addon_utils.enable("object_print3d_utils", default_set=False)
+    # Verify the module actually loaded — enable() doesn't raise on missing addons
+    import importlib
+    if importlib.util.find_spec("object_print3d_utils") is not None:
+        _print3d_available = True
+        print("✅ 3D Print Toolbox addon loaded successfully")
+    else:
+        print("⚠️  3D Print Toolbox not found — manifold repair will use bmesh fallbacks only")
+except Exception as e:
+    print(f"⚠️  3D Print Toolbox addon failed to load: {e} — using bmesh fallbacks only")
 
 print("=== BLENDER SCRIPT STARTED ===")
 print(f"Python version: {sys.version}")
@@ -77,8 +91,12 @@ def clean_mesh(obj, threshold=0.001, fill_holes=True, fix_normals=True):
 
 def apply_3d_print_toolbox(obj):
     """
-    Attempt 3D Print Toolbox manifold ops; log result either way.
+    Attempt 3D Print Toolbox manifold ops — only runs if the addon loaded.
+    If unavailable, logs clearly and returns so bmesh fallbacks take over.
     """
+    if not _print3d_available:
+        print("  ℹ️  3D Print Toolbox not available — skipping, bmesh fallbacks will handle this")
+        return
     bpy.context.view_layer.objects.active = obj
     try:
         bpy.ops.object.mode_set(mode='EDIT')
