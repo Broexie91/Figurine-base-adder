@@ -141,21 +141,6 @@ def apply_3d_print_toolbox(obj, threshold=0.001):
     print("✅ Native manifold repair applied", flush=True)
 
 
-def voxel_remesh_fallback(obj, voxel_size=0.4):
-    """
-    Last-resort remesh to force a watertight shell.
-    Loses fine detail but guarantees a manifold output.
-    """
-    print(f"🔧 Applying voxel remesh fallback (voxel_size={voxel_size})...")
-    bpy.context.view_layer.objects.active = obj
-    remesh = obj.modifiers.new("Remesh_Fallback", 'REMESH')
-    remesh.mode = 'VOXEL'
-    remesh.voxel_size = voxel_size
-    remesh.use_smooth_shade = True
-    bpy.ops.object.modifier_apply(modifier=remesh.name)
-    print("✅ Voxel remesh applied")
-
-
 def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
@@ -237,10 +222,9 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
 
-    print(f"⚠️  FLOAT {modifier_name} also ineffective. Remeshing tool and retrying EXACT...")
+    print(f"⚠️  FLOAT {modifier_name} also ineffective. Retrying EXACT with hole tolerance...")
 
-    # --- Attempt 3: Voxel-remesh tool, then EXACT again ---
-    voxel_remesh_fallback(tool_obj, voxel_size=0.5)
+    # --- Attempt 3: EXACT again with hole tolerant ---
     if _try_solver('EXACT', hole_tolerant=True):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
@@ -253,14 +237,9 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     bpy.context.view_layer.objects.active = target_obj
     bpy.ops.object.join()
 
-    # After JOIN, try a final voxel remesh on the combined object to unify shells
-    open_e_after, _ = check_manifold(target_obj)
-    if open_e_after > 0:
-        print(f"  JOIN left {open_e_after} open edges — applying voxel remesh to unify...")
-        voxel_remesh_fallback(target_obj, voxel_size=0.4)
-
     print(f"⚠️  {modifier_name} completed via JOIN (may have overlapping shells).")
     return False
+
 
 
 # ====================== MAIN ======================
@@ -467,16 +446,9 @@ try:
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
 
         open_e, non_m = check_manifold(model)
-        print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+        print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-        # If base union left non-manifold seams, do a final remesh
-        if open_e > 50:
-            print(f"  ⚠️  {open_e} open edges after base union — applying voxel remesh to seal...")
-            voxel_remesh_fallback(model, voxel_size=0.4)
-            open_e, non_m = check_manifold(model)
-            print(f"  Post-remesh manifold: open_edges={open_e}, non_manifold_verts={non_m}")
-
-        print("✅ Base architecture complete!")
+        print("✅ Base architecture complete!", flush=True)
 
     # ====================== KEYCHAIN ======================
     if add_keychain:
@@ -548,15 +520,10 @@ try:
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
 
         open_e, non_m = check_manifold(model)
-        print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}")
-
-        if open_e > 50:
-            print(f"  ⚠️  {open_e} open edges after keychain union — applying voxel remesh...")
-            voxel_remesh_fallback(model, voxel_size=0.4)
-            open_e, non_m = check_manifold(model)
-            print(f"  Post-remesh manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+        print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== FINAL MANIFOLD GATE ======================
+
     open_e, non_m = check_manifold(model)
     print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
 
@@ -565,12 +532,7 @@ try:
         apply_3d_print_toolbox(model)
         clean_mesh(model, threshold=0.01, fill_holes=True, fix_normals=True)
         open_e, non_m = check_manifold(model)
-        print(f"  After final repair: open_edges={open_e}, non_manifold_verts={non_m}")
-        if open_e > 100:
-            print("  Still significantly non-manifold — applying last-resort voxel remesh...")
-            voxel_remesh_fallback(model, voxel_size=0.35)
-            open_e, non_m = check_manifold(model)
-            print(f"  After last-resort remesh: open_edges={open_e}, non_manifold_verts={non_m}")
+        print(f"  After final repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== EXPORT ======================
     bpy.ops.object.select_all(action='DESELECT')
