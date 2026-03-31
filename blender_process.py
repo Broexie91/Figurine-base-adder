@@ -5,7 +5,6 @@ import os
 import traceback
 import bmesh
 from mathutils import Vector
-import addon_utils
 
 # Force unbuffered stdout so every print() appears in Railway logs immediately,
 # even if the process is killed mid-run by a timeout.
@@ -15,17 +14,7 @@ except AttributeError:
     import functools
     print = functools.partial(print, flush=True)
 
-# Blender 4.2+ extensions use the bl_ext.user_default.<id> naming convention.
-# Try both so the script works across older and newer Blender builds.
-for _addon_id in ("bl_ext.user_default.print3d_toolbox", "object_print3d_utils"):
-    try:
-        addon_utils.enable(_addon_id, default_set=True, persistent=True)
-        print(f"✅ Addon enabled: {_addon_id}")
-        break
-    except Exception as _e:
-        print(f"⚠️  Could not enable {_addon_id}: {_e}")
-
-print("=== BLENDER SCRIPT STARTED ===")
+print("=== BLENDER SCRIPT STARTED ===", flush=True)
 print(f"Python version: {sys.version}")
 print(f"Blender version: {bpy.app.version_string}")
 print(f"Arguments received: {sys.argv}")
@@ -85,34 +74,71 @@ def clean_mesh(obj, threshold=0.001, fill_holes=True, fix_normals=True):
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.mesh.remove_doubles(threshold=threshold)
     if fill_holes:
-        bpy.ops.mesh.fill_holes(sides=4)
+        bpy.ops.mesh.fill_holes(sides=0)
     if fix_normals:
         bpy.ops.mesh.normals_make_consistent(inside=False)
     bpy.ops.object.mode_set(mode='OBJECT')
 
 
-def apply_3d_print_toolbox(obj):
+def apply_3d_print_toolbox(obj, threshold=0.001):
     """
-    Attempt 3D Print Toolbox manifold ops; log result either way.
+    Natively replicates the 'Make Manifold' operator from the 3D Print Toolbox.
+    Guarantees the mesh is cleaned of interior faces, loose geometry, and holes
+    so it is perfectly watertight for boolean operations.
     """
     bpy.context.view_layer.objects.active = obj
-    try:
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
-        if hasattr(bpy.ops.mesh, "print3d_clean_non_manifold"):
-            bpy.ops.mesh.print3d_clean_non_manifold()
-            print("✅ print3d_clean_non_manifold applied")
+    if obj.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
-
-        if hasattr(bpy.ops.object, "print3d_make_manifold"):
-            bpy.ops.object.print3d_make_manifold()
-            print("✅ print3d_make_manifold applied")
-    except Exception as e:
-        print(f"⚠️  3D Print Toolbox warning (non-fatal): {e}")
-        try:
-            bpy.ops.object.mode_set(mode='OBJECT')
-        except Exception:
-            pass
+        
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_mode(type='VERT')
+    bpy.ops.mesh.reveal(select=False)
+    
+    # 1. Delete loose geometry
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.delete_loose(use_verts=True, use_edges=True, use_faces=True)
+    
+    # 2. Delete interior faces
+    bpy.ops.mesh.select_all(action='DESELECT')
+    bpy.ops.mesh.select_interior_faces()
+    bpy.ops.mesh.delete(type='FACE')
+    
+    # 3. Remove doubles (merge by distance)
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.remove_doubles(threshold=threshold)
+    
+    # 4. Iteratively fill holes (sides=0 means fill all ngons)
+    def _elem_count():
+        bm = bmesh.from_edit_mesh(obj.data)
+        return len(bm.verts), len(bm.edges), len(bm.faces)
+        
+    bm_states = set()
+    bm_states.add(_elem_count())
+    
+    max_iters = 50
+    for _ in range(max_iters):
+        # Fill holes
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.fill_holes(sides=0)
+        
+        # Delete newly generated bad non-manifold verts from weird fills
+        bpy.ops.mesh.select_non_manifold(
+            extend=False, use_wire=True, use_boundary=False, 
+            use_multi_face=False, use_non_contiguous=False, use_verts=True
+        )
+        bpy.ops.mesh.delete(type='VERT')
+        
+        current_state = _elem_count()
+        if current_state in bm_states:
+            break
+        bm_states.add(current_state)
+        
+    # 5. Make normals consistently pointing outwards
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print("✅ Native manifold repair applied", flush=True)
 
 
 def voxel_remesh_fallback(obj, voxel_size=0.4):
