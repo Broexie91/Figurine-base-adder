@@ -286,52 +286,108 @@ try:
     out_dir = os.path.dirname(output_path)
     texture_path = os.path.join(out_dir, "model.png")
     found_texture = False
-    print("Searching for embedded textures...")
 
-    for mat in bpy.data.materials:
+    # --- Diagnostics: log everything about the imported materials ---
+    print(f"=== MATERIAL DIAGNOSTICS ===")
+    print(f"Total materials: {len(bpy.data.materials)}")
+    print(f"Total images in blend data: {len(bpy.data.images)}")
+    for i, mat in enumerate(bpy.data.materials):
+        print(f"  Material[{i}]: name='{mat.name}', use_nodes={mat.use_nodes}")
         if mat.use_nodes:
             for node in mat.node_tree.nodes:
-                if node.type == 'TEX_IMAGE' and node.image:
-                    img = node.image
-                    print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
+                print(f"    Node: type={node.type}, name='{node.name}'")
+                if node.type == 'TEX_IMAGE':
+                    print(f"      → image={node.image}, "
+                          f"size={node.image.size if node.image else 'N/A'}, "
+                          f"source={node.image.source if node.image else 'N/A'}")
+    for i, img in enumerate(bpy.data.images):
+        print(f"  Image[{i}]: name='{img.name}', size={img.size}, "
+              f"source='{img.source}', filepath='{img.filepath_raw}'")
+    print(f"=== END MATERIAL DIAGNOSTICS ===")
 
-                    # Inject grey sentinel pixels for base (light grey) and text (dark grey)
-                    w, h = img.size
-                    pixels = list(img.pixels)
-
-                    # Bottom-left: light grey (base colour hint)
-                    for y in range(min(4, h)):
-                        for x in range(min(4, w)):
-                            idx = (y * w + x) * 4
-                            if idx + 3 < len(pixels):
-                                pixels[idx]     = 0.75
-                                pixels[idx + 1] = 0.75
-                                pixels[idx + 2] = 0.75
-                                pixels[idx + 3] = 1.0
-
-                    # Top-left: dark grey (text colour hint)
-                    for y in range(max(0, h - 4), h):
-                        for x in range(min(4, w)):
-                            idx = (y * w + x) * 4
-                            if idx + 3 < len(pixels):
-                                pixels[idx]     = 0.15
-                                pixels[idx + 1] = 0.15
-                                pixels[idx + 2] = 0.15
-                                pixels[idx + 3] = 1.0
-
-                    img.pixels[:] = pixels
-                    img.update()
-                    img.filepath_raw = texture_path
-                    img.file_format = 'PNG'
-                    img.save()
-                    found_texture = True
-                    print(f"✅ Texture saved: {texture_path}")
-                    break
+    # --- Strategy 1: TEX_IMAGE node connected to Base Color (standard Meshy PBR) ---
+    print("Searching for embedded textures — Strategy 1: Base Color TEX_IMAGE node...")
+    for mat in bpy.data.materials:
+        if not mat.use_nodes:
+            continue
+        for node in mat.node_tree.nodes:
+            if node.type == 'TEX_IMAGE' and node.image and node.image.size[0] > 0:
+                img = node.image
+                print(f"  Found via Strategy 1: '{img.name}' ({img.size[0]}x{img.size[1]})")
+                found_texture = True
+                break
         if found_texture:
             break
 
+    # --- Strategy 2: Any image in bpy.data.images with pixel data ---
     if not found_texture:
-        print("⚠️  No embedded texture found.")
+        print("  Strategy 1 failed. Trying Strategy 2: bpy.data.images scan...")
+        for img in bpy.data.images:
+            if img.size[0] > 0 and img.size[1] > 0 and img.name != 'Render Result':
+                print(f"  Found via Strategy 2: '{img.name}' ({img.size[0]}x{img.size[1]})")
+                found_texture = True
+                break
+
+    if found_texture and img:
+        # Inject grey sentinel pixels
+        # Bottom-left corner → light grey (base/platform colour)
+        # Top-left corner    → dark grey  (text colour)
+        w, h = img.size
+        pixels = list(img.pixels)
+
+        for y in range(min(4, h)):
+            for x in range(min(4, w)):
+                idx = (y * w + x) * 4
+                if idx + 3 < len(pixels):
+                    pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3] = 0.75, 0.75, 0.75, 1.0
+
+        for y in range(max(0, h - 4), h):
+            for x in range(min(4, w)):
+                idx = (y * w + x) * 4
+                if idx + 3 < len(pixels):
+                    pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3] = 0.15, 0.15, 0.15, 1.0
+
+        img.pixels[:] = pixels
+        img.update()
+        img.filepath_raw = texture_path
+        img.file_format = 'PNG'
+        img.save()
+        print(f"✅ Texture saved: {texture_path}")
+
+        # Ensure ALL materials have a TEX_IMAGE node pointing to this image
+        # and that it is connected to Base Color — fixes cases where Meshy's
+        # node tree has the image loaded but not wired to the BSDF output.
+        for mat in bpy.data.materials:
+            if not mat.use_nodes:
+                mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            links = mat.node_tree.links
+
+            bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+            tex_node = next((n for n in nodes if n.type == 'TEX_IMAGE'), None)
+
+            if bsdf is None:
+                bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+
+            if tex_node is None:
+                tex_node = nodes.new('ShaderNodeTexImage')
+                print(f"  Created new TEX_IMAGE node in material '{mat.name}'")
+
+            # Always point to our saved texture
+            tex_node.image = img
+
+            # Wire to Base Color if not already connected
+            base_color_input = bsdf.inputs.get('Base Color')
+            already_linked = any(
+                lnk.to_node == bsdf and lnk.to_socket.name == 'Base Color'
+                for lnk in links
+            )
+            if base_color_input and not already_linked:
+                links.new(tex_node.outputs['Color'], base_color_input)
+                print(f"  Wired TEX_IMAGE → Base Color in material '{mat.name}'")
+
+    else:
+        print("⚠️  No texture found via any strategy. Model will export without texture.")
 
     # ====================== BASE + TEXT ======================
     bmin, bmax = get_bounds([model])
