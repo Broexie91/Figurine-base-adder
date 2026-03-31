@@ -7,7 +7,21 @@ import bmesh
 from mathutils import Vector
 import addon_utils
 
-addon_utils.enable("object_print3d_utils")
+# Enable 3D Print Toolbox if available — it ships with Blender but must be
+# explicitly enabled in headless/Docker environments via the Dockerfile build step.
+# If it's missing, all operations degrade gracefully to bmesh fallbacks.
+_print3d_available = False
+try:
+    addon_utils.enable("object_print3d_utils", default_set=False)
+    # Verify the module actually loaded — enable() doesn't raise on missing addons
+    import importlib
+    if importlib.util.find_spec("object_print3d_utils") is not None:
+        _print3d_available = True
+        print("✅ 3D Print Toolbox addon loaded successfully")
+    else:
+        print("⚠️  3D Print Toolbox not found — manifold repair will use bmesh fallbacks only")
+except Exception as e:
+    print(f"⚠️  3D Print Toolbox addon failed to load: {e} — using bmesh fallbacks only")
 
 print("=== BLENDER SCRIPT STARTED ===")
 print(f"Python version: {sys.version}")
@@ -77,8 +91,12 @@ def clean_mesh(obj, threshold=0.001, fill_holes=True, fix_normals=True):
 
 def apply_3d_print_toolbox(obj):
     """
-    Attempt 3D Print Toolbox manifold ops; log result either way.
+    Attempt 3D Print Toolbox manifold ops — only runs if the addon loaded.
+    If unavailable, logs clearly and returns so bmesh fallbacks take over.
     """
+    if not _print3d_available:
+        print("  ℹ️  3D Print Toolbox not available — skipping, bmesh fallbacks will handle this")
+        return
     bpy.context.view_layer.objects.active = obj
     try:
         bpy.ops.object.mode_set(mode='EDIT')
@@ -101,10 +119,13 @@ def apply_3d_print_toolbox(obj):
 
 def voxel_remesh_fallback(obj, voxel_size=0.4):
     """
-    Last-resort remesh to force a watertight shell.
-    Loses fine detail but guarantees a manifold output.
+    Voxel remesh — ONLY safe to call on tool objects (base cylinder, torus).
+    NEVER call this on the main model: it destroys UV maps completely.
     """
     print(f"🔧 Applying voxel remesh fallback (voxel_size={voxel_size})...")
+    if obj.data.uv_layers.active:
+        print(f"  🚫 REFUSED: object '{obj.name}' has UV data — voxel remesh would destroy it. Skipping.")
+        return
     bpy.context.view_layer.objects.active = obj
     remesh = obj.modifiers.new("Remesh_Fallback", 'REMESH')
     remesh.mode = 'VOXEL'
@@ -112,6 +133,59 @@ def voxel_remesh_fallback(obj, voxel_size=0.4):
     remesh.use_smooth_shade = True
     bpy.ops.object.modifier_apply(modifier=remesh.name)
     print("✅ Voxel remesh applied")
+
+
+def bmesh_close_holes(obj, max_hole_verts=50):
+    """
+    Use bmesh directly to close open boundary loops on the model.
+    This is UV-safe: it only adds new faces to fill holes, never
+    rebuilds or resamples the mesh topology.
+    Much safer than voxel remesh for UV-mapped models.
+    """
+    bpy.context.view_layer.objects.active = obj
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.edges.ensure_lookup_table()
+
+    # Find all boundary (open) edges
+    boundary_edges = [e for e in bm.edges if not e.is_manifold]
+    print(f"  bmesh_close_holes: {len(boundary_edges)} boundary edges found")
+
+    if boundary_edges:
+        # Fill holes — only fills loops up to max_hole_verts in size
+        # to avoid accidentally capping the entire model opening
+        bmesh.ops.holes_fill(bm, edges=boundary_edges, sides=max_hole_verts)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    print(f"  ✅ bmesh_close_holes done")
+
+
+def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
+    """
+    After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
+    These are the boolean-generated intersection faces that have no valid atlas mapping.
+    All original UV islands from the Meshy AI model are left completely untouched.
+
+    Out-of-range UVs (outside 0.0–1.0) are the reliable signature of boolean-created
+    faces — Blender interpolates UV coordinates across the cut which often land outside
+    the valid texture space.
+    """
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.active
+    if not uv_layer:
+        print("  ⚠️  No active UV layer found, skipping UV pin.")
+        return
+    fixed = 0
+    for poly in mesh.polygons:
+        for loop_idx in poly.loop_indices:
+            uv = uv_layer.data[loop_idx].uv
+            if not (0.0 <= uv.x <= 1.0 and 0.0 <= uv.y <= 1.0):
+                uv_layer.data[loop_idx].uv = uv_coord
+                fixed += 1
+    print(f"  ✅ Pinned {fixed} out-of-range UV loops → {uv_coord} (original atlas untouched)")
 
 
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
@@ -130,6 +204,15 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
 
     open_e, non_m = check_manifold(target_obj)
     print(f"  Target manifold check before boolean: open_edges={open_e}, non_manifold_verts={non_m}")
+
+    # If the target is non-manifold, boolean solvers will silently fail.
+    # Close holes with bmesh first — this is UV-safe unlike voxel remesh.
+    if open_e > 0:
+        print(f"  Target has {open_e} open edges — running bmesh_close_holes before boolean...")
+        bmesh_close_holes(target_obj)
+        open_e, non_m = check_manifold(target_obj)
+        print(f"  After bmesh_close_holes: open_edges={open_e}, non_manifold_verts={non_m}")
+
     vert_before = len(target_obj.data.vertices)
 
     def _try_solver(solver_name, hole_tolerant=False):
@@ -176,13 +259,14 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     bpy.context.view_layer.objects.active = target_obj
     bpy.ops.object.join()
 
-    # After JOIN, try a final voxel remesh on the combined object to unify shells
+    # After JOIN, use UV-safe bmesh hole filler instead of voxel remesh.
+    # Voxel remesh would destroy the UV map — never use it on the main model.
     open_e_after, _ = check_manifold(target_obj)
     if open_e_after > 0:
-        print(f"  JOIN left {open_e_after} open edges — applying voxel remesh to unify...")
-        voxel_remesh_fallback(target_obj, voxel_size=0.4)
+        print(f"  JOIN left {open_e_after} open edges — using bmesh_close_holes (UV-safe)...")
+        bmesh_close_holes(target_obj)
 
-    print(f"⚠️  {modifier_name} completed via JOIN (may have overlapping shells).")
+    print(f"⚠️  {modifier_name} completed via JOIN.")
     return False
 
 
@@ -261,52 +345,108 @@ try:
     out_dir = os.path.dirname(output_path)
     texture_path = os.path.join(out_dir, "model.png")
     found_texture = False
-    print("Searching for embedded textures...")
 
-    for mat in bpy.data.materials:
+    # --- Diagnostics: log everything about the imported materials ---
+    print(f"=== MATERIAL DIAGNOSTICS ===")
+    print(f"Total materials: {len(bpy.data.materials)}")
+    print(f"Total images in blend data: {len(bpy.data.images)}")
+    for i, mat in enumerate(bpy.data.materials):
+        print(f"  Material[{i}]: name='{mat.name}', use_nodes={mat.use_nodes}")
         if mat.use_nodes:
             for node in mat.node_tree.nodes:
-                if node.type == 'TEX_IMAGE' and node.image:
-                    img = node.image
-                    print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
+                print(f"    Node: type={node.type}, name='{node.name}'")
+                if node.type == 'TEX_IMAGE':
+                    print(f"      → image={node.image}, "
+                          f"size={node.image.size if node.image else 'N/A'}, "
+                          f"source={node.image.source if node.image else 'N/A'}")
+    for i, img in enumerate(bpy.data.images):
+        print(f"  Image[{i}]: name='{img.name}', size={img.size}, "
+              f"source='{img.source}', filepath='{img.filepath_raw}'")
+    print(f"=== END MATERIAL DIAGNOSTICS ===")
 
-                    # Inject grey sentinel pixels for base (light grey) and text (dark grey)
-                    w, h = img.size
-                    pixels = list(img.pixels)
-
-                    # Bottom-left: light grey (base colour hint)
-                    for y in range(min(4, h)):
-                        for x in range(min(4, w)):
-                            idx = (y * w + x) * 4
-                            if idx + 3 < len(pixels):
-                                pixels[idx]     = 0.75
-                                pixels[idx + 1] = 0.75
-                                pixels[idx + 2] = 0.75
-                                pixels[idx + 3] = 1.0
-
-                    # Top-left: dark grey (text colour hint)
-                    for y in range(max(0, h - 4), h):
-                        for x in range(min(4, w)):
-                            idx = (y * w + x) * 4
-                            if idx + 3 < len(pixels):
-                                pixels[idx]     = 0.15
-                                pixels[idx + 1] = 0.15
-                                pixels[idx + 2] = 0.15
-                                pixels[idx + 3] = 1.0
-
-                    img.pixels[:] = pixels
-                    img.update()
-                    img.filepath_raw = texture_path
-                    img.file_format = 'PNG'
-                    img.save()
-                    found_texture = True
-                    print(f"✅ Texture saved: {texture_path}")
-                    break
+    # --- Strategy 1: TEX_IMAGE node connected to Base Color (standard Meshy PBR) ---
+    print("Searching for embedded textures — Strategy 1: Base Color TEX_IMAGE node...")
+    for mat in bpy.data.materials:
+        if not mat.use_nodes:
+            continue
+        for node in mat.node_tree.nodes:
+            if node.type == 'TEX_IMAGE' and node.image and node.image.size[0] > 0:
+                img = node.image
+                print(f"  Found via Strategy 1: '{img.name}' ({img.size[0]}x{img.size[1]})")
+                found_texture = True
+                break
         if found_texture:
             break
 
+    # --- Strategy 2: Any image in bpy.data.images with pixel data ---
     if not found_texture:
-        print("⚠️  No embedded texture found.")
+        print("  Strategy 1 failed. Trying Strategy 2: bpy.data.images scan...")
+        for img in bpy.data.images:
+            if img.size[0] > 0 and img.size[1] > 0 and img.name != 'Render Result':
+                print(f"  Found via Strategy 2: '{img.name}' ({img.size[0]}x{img.size[1]})")
+                found_texture = True
+                break
+
+    if found_texture and img:
+        # Inject grey sentinel pixels
+        # Bottom-left corner → light grey (base/platform colour)
+        # Top-left corner    → dark grey  (text colour)
+        w, h = img.size
+        pixels = list(img.pixels)
+
+        for y in range(min(4, h)):
+            for x in range(min(4, w)):
+                idx = (y * w + x) * 4
+                if idx + 3 < len(pixels):
+                    pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3] = 0.75, 0.75, 0.75, 1.0
+
+        for y in range(max(0, h - 4), h):
+            for x in range(min(4, w)):
+                idx = (y * w + x) * 4
+                if idx + 3 < len(pixels):
+                    pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3] = 0.15, 0.15, 0.15, 1.0
+
+        img.pixels[:] = pixels
+        img.update()
+        img.filepath_raw = texture_path
+        img.file_format = 'PNG'
+        img.save()
+        print(f"✅ Texture saved: {texture_path}")
+
+        # Ensure ALL materials have a TEX_IMAGE node pointing to this image
+        # and that it is connected to Base Color — fixes cases where Meshy's
+        # node tree has the image loaded but not wired to the BSDF output.
+        for mat in bpy.data.materials:
+            if not mat.use_nodes:
+                mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            links = mat.node_tree.links
+
+            bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+            tex_node = next((n for n in nodes if n.type == 'TEX_IMAGE'), None)
+
+            if bsdf is None:
+                bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+
+            if tex_node is None:
+                tex_node = nodes.new('ShaderNodeTexImage')
+                print(f"  Created new TEX_IMAGE node in material '{mat.name}'")
+
+            # Always point to our saved texture
+            tex_node.image = img
+
+            # Wire to Base Color if not already connected
+            base_color_input = bsdf.inputs.get('Base Color')
+            already_linked = any(
+                lnk.to_node == bsdf and lnk.to_socket.name == 'Base Color'
+                for lnk in links
+            )
+            if base_color_input and not already_linked:
+                links.new(tex_node.outputs['Color'], base_color_input)
+                print(f"  Wired TEX_IMAGE → Base Color in material '{mat.name}'")
+
+    else:
+        print("⚠️  No texture found via any strategy. Model will export without texture.")
 
     # ====================== BASE + TEXT ======================
     bmin, bmax = get_bounds([model])
@@ -378,6 +518,11 @@ try:
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
 
+        # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
+        # Original Meshy AI atlas UVs are NOT touched.
+        print("Pinning out-of-range UVs after base union...")
+        pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
+
         # Final cleanup on unified mesh
         print("Running final seam cleanup...")
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
@@ -385,12 +530,12 @@ try:
         open_e, non_m = check_manifold(model)
         print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
-        # If base union left non-manifold seams, do a final remesh
+        # If base union left non-manifold seams, use UV-safe hole filler
         if open_e > 50:
-            print(f"  ⚠️  {open_e} open edges after base union — applying voxel remesh to seal...")
-            voxel_remesh_fallback(model, voxel_size=0.4)
+            print(f"  ⚠️  {open_e} open edges after base union — using bmesh_close_holes (UV-safe)...")
+            bmesh_close_holes(model)
             open_e, non_m = check_manifold(model)
-            print(f"  Post-remesh manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+            print(f"  Post-hole-fill manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
         print("✅ Base architecture complete!")
 
@@ -455,6 +600,11 @@ try:
 
         robust_boolean_union(model, torus, "Keychain_Union")
 
+        # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
+        # Original Meshy AI atlas UVs are NOT touched.
+        print("Pinning out-of-range UVs after keychain union...")
+        pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
+
         # Final cleanup on keychain seam
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
 
@@ -462,10 +612,10 @@ try:
         print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
         if open_e > 50:
-            print(f"  ⚠️  {open_e} open edges after keychain union — applying voxel remesh...")
-            voxel_remesh_fallback(model, voxel_size=0.4)
+            print(f"  ⚠️  {open_e} open edges after keychain union — using bmesh_close_holes (UV-safe)...")
+            bmesh_close_holes(model)
             open_e, non_m = check_manifold(model)
-            print(f"  Post-remesh manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+            print(f"  Post-hole-fill manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
     # ====================== FINAL MANIFOLD GATE ======================
     open_e, non_m = check_manifold(model)
@@ -477,11 +627,11 @@ try:
         clean_mesh(model, threshold=0.01, fill_holes=True, fix_normals=True)
         open_e, non_m = check_manifold(model)
         print(f"  After final repair: open_edges={open_e}, non_manifold_verts={non_m}")
-        if open_e > 100:
-            print("  Still significantly non-manifold — applying last-resort voxel remesh...")
-            voxel_remesh_fallback(model, voxel_size=0.35)
+        if open_e > 0:
+            print("  Still non-manifold — applying UV-safe bmesh hole fill as last resort...")
+            bmesh_close_holes(model)
             open_e, non_m = check_manifold(model)
-            print(f"  After last-resort remesh: open_edges={open_e}, non_manifold_verts={non_m}")
+            print(f"  After bmesh_close_holes: open_edges={open_e}, non_manifold_verts={non_m}")
 
     # ====================== EXPORT ======================
     bpy.ops.object.select_all(action='DESELECT')
@@ -495,14 +645,14 @@ try:
     print("Exporting to OBJ + MTL...")
 
     export_kwargs = {
-        'filepath':               output_path,
+        'filepath':                output_path,
         'export_selected_objects': True,
         'export_materials':        True,
         # export_colors omitted: Marketiger may reject vertex colour data
         'export_normals':          True,
         'export_uv':               True,
-        'path_mode':               'COPY',
-        'global_scale':            1.0,   # model units are mm; keep 1:1
+        'path_mode':               'STRIP',  # outputs "model.png" not an absolute path in MTL
+        'global_scale':            1.0,      # model units are mm; keep 1:1
     }
 
     try:
@@ -511,6 +661,15 @@ try:
     except TypeError:
         del export_kwargs['export_triangulated_mesh']
         bpy.ops.wm.obj_export(**export_kwargs)
+
+    # Log MTL contents so texture reference can be verified in Railway logs
+    mtl_path = output_path.replace('.obj', '.mtl')
+    if os.path.exists(mtl_path):
+        with open(mtl_path, 'r') as f:
+            mtl_contents = f.read()
+        print(f"MTL contents:\n{mtl_contents}")
+    else:
+        print("⚠️  MTL file not found after export!")
 
     print(f"✅ Export complete: {output_path}")
     print("=== Blender processing finished successfully ===")
