@@ -6,20 +6,38 @@ import traceback
 import bmesh
 from mathutils import Vector
 import addon_utils
+import importlib
+import importlib.util
 
-# Enable 3D Print Toolbox if available — it ships with Blender but must be
-# explicitly enabled in headless/Docker environments via the Dockerfile build step.
-# If it's missing, all operations degrade gracefully to bmesh fallbacks.
+# Enable 3D Print Toolbox — locate it directly inside the Blender install folder
+# so it works in headless/Docker regardless of saved user preferences.
 _print3d_available = False
 try:
+    # Find the addon inside Blender's bundled addons directory
+    import os as _os
+    import sys as _sys
+
+    _blender_bin = _os.path.realpath("/opt/blender/blender")
+    _blender_dir = _os.path.dirname(_blender_bin)
+
+    # Walk up to find the versioned folder containing bundled addons
+    # e.g. /opt/blender/5.1/scripts/addons/
+    for _root, _dirs, _files in _os.walk(_blender_dir):
+        if _root.endswith("scripts/addons") and _os.path.isdir(_os.path.join(_root, "object_print3d_utils")):
+            if _root not in _sys.path:
+                _sys.path.insert(0, _root)
+            print(f"✅ Found 3D Print Toolbox at: {_root}")
+            break
+
     addon_utils.enable("object_print3d_utils", default_set=False)
-    # Verify the module actually loaded — enable() doesn't raise on missing addons
-    import importlib
-    if importlib.util.find_spec("object_print3d_utils") is not None:
+
+    # Verify the module actually loaded
+    spec = importlib.util.find_spec("object_print3d_utils")
+    if spec is not None:
         _print3d_available = True
         print("✅ 3D Print Toolbox addon loaded successfully")
     else:
-        print("⚠️  3D Print Toolbox not found — manifold repair will use bmesh fallbacks only")
+        print("⚠️  3D Print Toolbox not found in Blender install — using bmesh fallbacks only")
 except Exception as e:
     print(f"⚠️  3D Print Toolbox addon failed to load: {e} — using bmesh fallbacks only")
 
