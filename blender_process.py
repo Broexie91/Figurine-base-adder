@@ -303,22 +303,10 @@ try:
                     img = node.image
                     print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
 
-                    # Inject grey sentinel pixels using numpy — avoids copying 16M floats
-                    # into a Python list (which caused timeouts on 2048x2048 textures).
-                    w, h = img.size
-                    import numpy as np
-                    px = np.empty(w * h * 4, dtype=np.float32)
-                    img.pixels.foreach_get(px)
-                    px = px.reshape(h, w, 4)
-
-                    # Bottom-left 4×4: light grey (base colour hint)
-                    px[:min(4, h), :min(4, w)] = [0.75, 0.75, 0.75, 1.0]
-
-                    # Top-left 4×4: dark grey (text colour hint)
-                    px[max(0, h - 4):h, :min(4, w)] = [0.15, 0.15, 0.15, 1.0]
-
-                    img.pixels.foreach_set(px.ravel())
-                    img.update()
+                    # Save the texture as-is directly — do NOT access img.pixels.
+                    # Accessing img.pixels (even via numpy) forces Blender to decode and
+                    # load the full embedded texture into RAM, which can take minutes on
+                    # a 2048×2048 Meshy texture and was causing the Railway timeout.
                     img.filepath_raw = texture_path
                     img.file_format = 'PNG'
                     img.save()
