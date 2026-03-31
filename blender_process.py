@@ -303,15 +303,39 @@ try:
                     img = node.image
                     print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
 
-                    # Save the texture as-is directly — do NOT access img.pixels.
-                    # Accessing img.pixels (even via numpy) forces Blender to decode and
-                    # load the full embedded texture into RAM, which can take minutes on
-                    # a 2048×2048 Meshy texture and was causing the Railway timeout.
+                    # Step 1: Save as-is — fast, no pixel decode in Blender's float buffer.
                     img.filepath_raw = texture_path
                     img.file_format = 'PNG'
                     img.save()
                     found_texture = True
                     print(f"✅ Texture saved: {texture_path}")
+
+                    # Step 2: Patch sentinel corner pixels via Pillow subprocess.
+                    # PIL reads the PNG natively (compressed) and only writes 16 pixels,
+                    # so this is near-instant regardless of texture size.
+                    # - Bottom-left 4×4 → light grey (0.75 linear ≈ RGB 191) = base colour
+                    # - Top-left 4×4   → dark grey  (0.15 linear ≈ RGB 38)  = text colour
+                    patch_script = (
+                        "from PIL import Image, ImageDraw; "
+                        f"img=Image.open(r'{texture_path}').convert('RGBA'); "
+                        "d=ImageDraw.Draw(img); "
+                        "d.rectangle([0,0,3,3],   fill=(191,191,191,255)); "  # base: light grey
+                        "d.rectangle([0,img.height-4,3,img.height-1], fill=(38,38,38,255)); "  # text: dark grey
+                        f"img.save(r'{texture_path}')"
+                    )
+                    try:
+                        import subprocess as _sp
+                        _result = _sp.run(
+                            ["/venv/bin/python", "-c", patch_script],
+                            capture_output=True, text=True, timeout=30
+                        )
+                        if _result.returncode == 0:
+                            print("✅ Sentinel pixels patched via PIL")
+                        else:
+                            print(f"⚠️  PIL patch failed (non-fatal): {_result.stderr.strip()}")
+                    except Exception as _e:
+                        print(f"⚠️  PIL patch skipped (non-fatal): {_e}")
+
                     break
         if found_texture:
             break
