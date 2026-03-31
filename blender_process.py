@@ -7,6 +7,14 @@ import bmesh
 from mathutils import Vector
 import addon_utils
 
+# Force unbuffered stdout so every print() appears in Railway logs immediately,
+# even if the process is killed mid-run by a timeout.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:
+    import functools
+    print = functools.partial(print, flush=True)
+
 # Blender 4.2+ extensions use the bl_ext.user_default.<id> naming convention.
 # Try both so the script works across older and newer Blender builds.
 for _addon_id in ("bl_ext.user_default.print3d_toolbox", "object_print3d_utils"):
@@ -257,15 +265,15 @@ try:
         bpy.ops.object.join()
 
     model = bpy.context.active_object
-    print(f"Model loaded with {len(model.data.vertices)} vertices")
+    print(f"Model loaded with {len(model.data.vertices)} vertices", flush=True)
 
     # ====================== PRE-CLEAN (before scaling) ======================
-    # Meshy AI outputs often have duplicates, zero-area faces, and flipped normals.
-    print("Running pre-clean on raw import...")
+    print("Running pre-clean on raw import...", flush=True)
     clean_mesh(model, threshold=0.001, fill_holes=True, fix_normals=True)
+    print("  Pre-clean done.", flush=True)
 
     open_e, non_m = check_manifold(model)
-    print(f"  Post pre-clean manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+    print(f"  Post pre-clean manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== SCALE ======================
     bmin, bmax = get_bounds([model])
@@ -273,28 +281,28 @@ try:
     scale_factor = desired_height_mm / current_height
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
-    print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm")
+    print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
     # ====================== 3D PRINT TOOLBOX CLEANUP ======================
-    print("Applying 3D Print Toolbox manifold repair...")
+    print("Applying 3D Print Toolbox manifold repair...", flush=True)
     apply_3d_print_toolbox(model)
+    print("  3D Print Toolbox done.", flush=True)
 
     # Post-toolbox check
     open_e, non_m = check_manifold(model)
-    print(f"  Post-toolbox manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+    print(f"  Post-toolbox manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-    # If still non-manifold after toolbox, run a second clean pass
     if open_e > 0:
-        print("  Still non-manifold — running secondary clean pass...")
+        print("  Still non-manifold — running secondary clean pass...", flush=True)
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
         open_e, non_m = check_manifold(model)
-        print(f"  Post-secondary-clean: open_edges={open_e}, non_manifold_verts={non_m}")
+        print(f"  Post-secondary-clean: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== TEXTURE EXPORT ======================
     out_dir = os.path.dirname(output_path)
     texture_path = os.path.join(out_dir, "model.png")
     found_texture = False
-    print("Searching for embedded textures...")
+    print("Searching for embedded textures...", flush=True)
 
     for mat in bpy.data.materials:
         if mat.use_nodes:
