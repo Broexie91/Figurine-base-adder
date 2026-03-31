@@ -74,15 +74,17 @@ async def add_base(request: BaseRequest):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
+            # Always flush Blender output to Railway logs so we can debug any run
+            print("--- Blender stdout ---")
+            print(result.stdout)
+            print("--- Blender stderr ---")
+            print(result.stderr)
+            print(f"--- Blender return code: {result.returncode} ---")
+
             if result.returncode != 0 or not output_obj.exists():
-                print("Blender StdErr:", result.stderr)
-                print("Blender StdOut:", result.stdout)
-                
-                # Snip the last 1000 characters of stdout to return to the user if it exists
                 error_log = result.stdout[-1000:] if result.stdout else "No output"
-                
                 raise HTTPException(
-                    status_code=500, 
+                    status_code=500,
                     detail=f"Blender verwerking mislukt. Error log: {error_log}"
                 )
 
@@ -110,8 +112,15 @@ async def add_base(request: BaseRequest):
                 }
             )
 
-        except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=500, detail="Verwerking timeout")
+        except subprocess.TimeoutExpired as e:
+            # Dump whatever partial output Blender produced before the timeout
+            partial_out = (e.output or b"").decode(errors="replace") if isinstance(e.output, bytes) else (e.output or "")
+            partial_err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            print("--- Blender TIMEOUT partial stdout ---")
+            print(partial_out or "(geen output)")
+            print("--- Blender TIMEOUT partial stderr ---")
+            print(partial_err or "(geen output)")
+            raise HTTPException(status_code=500, detail="Verwerking timeout (120s overschreden)")
         except Exception as e:
             print(f"Unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Onverwachte fout: {str(e)}")
