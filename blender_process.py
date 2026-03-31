@@ -9,35 +9,33 @@ import addon_utils
 import importlib
 import importlib.util
 
-# Enable 3D Print Toolbox — locate it directly inside the Blender install folder
-# so it works in headless/Docker regardless of saved user preferences.
+# Enable 3D Print Toolbox using bpy.utils.script_paths() — the correct Blender
+# API to locate bundled addons regardless of install path or version.
 _print3d_available = False
 try:
-    # Find the addon inside Blender's bundled addons directory
-    import os as _os
-    import sys as _sys
+    # Ask Blender itself where its addon folders are
+    _addon_paths = bpy.utils.script_paths(subdir="addons")
+    _addon_paths += bpy.utils.script_paths(subdir="addons_contrib")
+    print(f"Blender addon search paths: {_addon_paths}")
 
-    _blender_bin = _os.path.realpath("/opt/blender/blender")
-    _blender_dir = _os.path.dirname(_blender_bin)
-
-    # Walk up to find the versioned folder containing bundled addons
-    # e.g. /opt/blender/5.1/scripts/addons/
-    for _root, _dirs, _files in _os.walk(_blender_dir):
-        if _root.endswith("scripts/addons") and _os.path.isdir(_os.path.join(_root, "object_print3d_utils")):
-            if _root not in _sys.path:
-                _sys.path.insert(0, _root)
-            print(f"✅ Found 3D Print Toolbox at: {_root}")
+    for _p in _addon_paths:
+        _addon_dir = os.path.join(_p, "object_print3d_utils")
+        if os.path.isdir(_addon_dir):
+            print(f"✅ Found 3D Print Toolbox at: {_p}")
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
             break
+    else:
+        print("⚠️  object_print3d_utils folder not found in any Blender addon path")
 
     addon_utils.enable("object_print3d_utils", default_set=False)
 
-    # Verify the module actually loaded
     spec = importlib.util.find_spec("object_print3d_utils")
     if spec is not None:
         _print3d_available = True
         print("✅ 3D Print Toolbox addon loaded successfully")
     else:
-        print("⚠️  3D Print Toolbox not found in Blender install — using bmesh fallbacks only")
+        print("⚠️  3D Print Toolbox still not importable — using bmesh fallbacks only")
 except Exception as e:
     print(f"⚠️  3D Print Toolbox addon failed to load: {e} — using bmesh fallbacks only")
 
@@ -369,8 +367,9 @@ try:
     print(f"Total materials: {len(bpy.data.materials)}")
     print(f"Total images in blend data: {len(bpy.data.images)}")
     for i, mat in enumerate(bpy.data.materials):
-        print(f"  Material[{i}]: name='{mat.name}', use_nodes={mat.use_nodes}")
-        if mat.use_nodes:
+        has_nodes = mat.node_tree is not None
+        print(f"  Material[{i}]: name='{mat.name}', has_node_tree={has_nodes}")
+        if has_nodes:
             for node in mat.node_tree.nodes:
                 print(f"    Node: type={node.type}, name='{node.name}'")
                 if node.type == 'TEX_IMAGE':
@@ -385,7 +384,7 @@ try:
     # --- Strategy 1: TEX_IMAGE node connected to Base Color (standard Meshy PBR) ---
     print("Searching for embedded textures — Strategy 1: Base Color TEX_IMAGE node...")
     for mat in bpy.data.materials:
-        if not mat.use_nodes:
+        if mat.node_tree is None:
             continue
         for node in mat.node_tree.nodes:
             if node.type == 'TEX_IMAGE' and node.image and node.image.size[0] > 0:
@@ -435,8 +434,9 @@ try:
         # and that it is connected to Base Color — fixes cases where Meshy's
         # node tree has the image loaded but not wired to the BSDF output.
         for mat in bpy.data.materials:
-            if not mat.use_nodes:
-                mat.use_nodes = True
+            # Ensure node tree exists (Blender 5.x: use_nodes is deprecated)
+            if mat.node_tree is None:
+                mat.node_tree = bpy.data.node_groups.new(mat.name, 'ShaderNodeTree')
             nodes = mat.node_tree.nodes
             links = mat.node_tree.links
 
