@@ -133,26 +133,36 @@ def voxel_remesh_fallback(obj, voxel_size=0.4):
 def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
-    These are the boolean-generated intersection faces that have no valid atlas mapping.
-    All original UV islands from the Meshy AI model are left completely untouched.
-
-    Out-of-range UVs (outside 0.0–1.0) are the reliable signature of boolean-created
-    faces — Blender interpolates UV coordinates across the cut which often land outside
-    the valid texture space.
+    Uses numpy foreach_get/foreach_set to avoid slow Python loops over all loops.
     """
+    import numpy as np
     mesh = obj.data
     uv_layer = mesh.uv_layers.active
     if not uv_layer:
         print("  ⚠️  No active UV layer found, skipping UV pin.")
         return
-    fixed = 0
-    for poly in mesh.polygons:
-        for loop_idx in poly.loop_indices:
-            uv = uv_layer.data[loop_idx].uv
-            if not (0.0 <= uv.x <= 1.0 and 0.0 <= uv.y <= 1.0):
-                uv_layer.data[loop_idx].uv = uv_coord
-                fixed += 1
-    print(f"  ✅ Pinned {fixed} out-of-range UV loops → {uv_coord} (original atlas untouched)")
+
+    n_loops = len(mesh.loops)
+    if n_loops == 0:
+        return
+
+    # Read all UV coords in one fast C-level call
+    uvs = np.empty(n_loops * 2, dtype=np.float32)
+    uv_layer.data.foreach_get("uv", uvs)
+    uvs = uvs.reshape(n_loops, 2)
+
+    # Find loops with UVs outside [0, 1] — these are boolean-generated faces
+    out_of_range = ~(
+        (uvs[:, 0] >= 0.0) & (uvs[:, 0] <= 1.0) &
+        (uvs[:, 1] >= 0.0) & (uvs[:, 1] <= 1.0)
+    )
+    fixed = int(out_of_range.sum())
+
+    if fixed > 0:
+        uvs[out_of_range] = uv_coord
+        uv_layer.data.foreach_set("uv", uvs.ravel())
+
+    print(f"  ✅ Pinned {fixed} out-of-range UV loops → {uv_coord} (original atlas untouched)", flush=True)
 
 
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
