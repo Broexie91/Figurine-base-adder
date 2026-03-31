@@ -7,21 +7,7 @@ import bmesh
 from mathutils import Vector
 import addon_utils
 
-# Enable 3D Print Toolbox if available — it ships with Blender but must be
-# explicitly enabled in headless/Docker environments via the Dockerfile build step.
-# If it's missing, all operations degrade gracefully to bmesh fallbacks.
-_print3d_available = False
-try:
-    addon_utils.enable("object_print3d_utils", default_set=False)
-    # Verify the module actually loaded — enable() doesn't raise on missing addons
-    import importlib
-    if importlib.util.find_spec("object_print3d_utils") is not None:
-        _print3d_available = True
-        print("✅ 3D Print Toolbox addon loaded successfully")
-    else:
-        print("⚠️  3D Print Toolbox not found — manifold repair will use bmesh fallbacks only")
-except Exception as e:
-    print(f"⚠️  3D Print Toolbox addon failed to load: {e} — using bmesh fallbacks only")
+addon_utils.enable("object_print3d_utils")
 
 print("=== BLENDER SCRIPT STARTED ===")
 print(f"Python version: {sys.version}")
@@ -91,12 +77,8 @@ def clean_mesh(obj, threshold=0.001, fill_holes=True, fix_normals=True):
 
 def apply_3d_print_toolbox(obj):
     """
-    Attempt 3D Print Toolbox manifold ops — only runs if the addon loaded.
-    If unavailable, logs clearly and returns so bmesh fallbacks take over.
+    Attempt 3D Print Toolbox manifold ops; log result either way.
     """
-    if not _print3d_available:
-        print("  ℹ️  3D Print Toolbox not available — skipping, bmesh fallbacks will handle this")
-        return
     bpy.context.view_layer.objects.active = obj
     try:
         bpy.ops.object.mode_set(mode='EDIT')
@@ -119,13 +101,10 @@ def apply_3d_print_toolbox(obj):
 
 def voxel_remesh_fallback(obj, voxel_size=0.4):
     """
-    Voxel remesh — ONLY safe to call on tool objects (base cylinder, torus).
-    NEVER call this on the main model: it destroys UV maps completely.
+    Last-resort remesh to force a watertight shell.
+    Loses fine detail but guarantees a manifold output.
     """
     print(f"🔧 Applying voxel remesh fallback (voxel_size={voxel_size})...")
-    if obj.data.uv_layers.active:
-        print(f"  🚫 REFUSED: object '{obj.name}' has UV data — voxel remesh would destroy it. Skipping.")
-        return
     bpy.context.view_layer.objects.active = obj
     remesh = obj.modifiers.new("Remesh_Fallback", 'REMESH')
     remesh.mode = 'VOXEL'
@@ -133,34 +112,6 @@ def voxel_remesh_fallback(obj, voxel_size=0.4):
     remesh.use_smooth_shade = True
     bpy.ops.object.modifier_apply(modifier=remesh.name)
     print("✅ Voxel remesh applied")
-
-
-def bmesh_close_holes(obj, max_hole_verts=50):
-    """
-    Use bmesh directly to close open boundary loops on the model.
-    This is UV-safe: it only adds new faces to fill holes, never
-    rebuilds or resamples the mesh topology.
-    Much safer than voxel remesh for UV-mapped models.
-    """
-    bpy.context.view_layer.objects.active = obj
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
-    bm.edges.ensure_lookup_table()
-
-    # Find all boundary (open) edges
-    boundary_edges = [e for e in bm.edges if not e.is_manifold]
-    print(f"  bmesh_close_holes: {len(boundary_edges)} boundary edges found")
-
-    if boundary_edges:
-        # Fill holes — only fills loops up to max_hole_verts in size
-        # to avoid accidentally capping the entire model opening
-        bmesh.ops.holes_fill(bm, edges=boundary_edges, sides=max_hole_verts)
-        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-
-    bm.to_mesh(obj.data)
-    bm.free()
-    obj.data.update()
-    print(f"  ✅ bmesh_close_holes done")
 
 
 def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
@@ -204,15 +155,6 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
 
     open_e, non_m = check_manifold(target_obj)
     print(f"  Target manifold check before boolean: open_edges={open_e}, non_manifold_verts={non_m}")
-
-    # If the target is non-manifold, boolean solvers will silently fail.
-    # Close holes with bmesh first — this is UV-safe unlike voxel remesh.
-    if open_e > 0:
-        print(f"  Target has {open_e} open edges — running bmesh_close_holes before boolean...")
-        bmesh_close_holes(target_obj)
-        open_e, non_m = check_manifold(target_obj)
-        print(f"  After bmesh_close_holes: open_edges={open_e}, non_manifold_verts={non_m}")
-
     vert_before = len(target_obj.data.vertices)
 
     def _try_solver(solver_name, hole_tolerant=False):
@@ -259,14 +201,13 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     bpy.context.view_layer.objects.active = target_obj
     bpy.ops.object.join()
 
-    # After JOIN, use UV-safe bmesh hole filler instead of voxel remesh.
-    # Voxel remesh would destroy the UV map — never use it on the main model.
+    # After JOIN, try a final voxel remesh on the combined object to unify shells
     open_e_after, _ = check_manifold(target_obj)
     if open_e_after > 0:
-        print(f"  JOIN left {open_e_after} open edges — using bmesh_close_holes (UV-safe)...")
-        bmesh_close_holes(target_obj)
+        print(f"  JOIN left {open_e_after} open edges — applying voxel remesh to unify...")
+        voxel_remesh_fallback(target_obj, voxel_size=0.4)
 
-    print(f"⚠️  {modifier_name} completed via JOIN.")
+    print(f"⚠️  {modifier_name} completed via JOIN (may have overlapping shells).")
     return False
 
 
@@ -530,12 +471,12 @@ try:
         open_e, non_m = check_manifold(model)
         print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
-        # If base union left non-manifold seams, use UV-safe hole filler
+        # If base union left non-manifold seams, do a final remesh
         if open_e > 50:
-            print(f"  ⚠️  {open_e} open edges after base union — using bmesh_close_holes (UV-safe)...")
-            bmesh_close_holes(model)
+            print(f"  ⚠️  {open_e} open edges after base union — applying voxel remesh to seal...")
+            voxel_remesh_fallback(model, voxel_size=0.4)
             open_e, non_m = check_manifold(model)
-            print(f"  Post-hole-fill manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+            print(f"  Post-remesh manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
         print("✅ Base architecture complete!")
 
@@ -612,10 +553,10 @@ try:
         print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
         if open_e > 50:
-            print(f"  ⚠️  {open_e} open edges after keychain union — using bmesh_close_holes (UV-safe)...")
-            bmesh_close_holes(model)
+            print(f"  ⚠️  {open_e} open edges after keychain union — applying voxel remesh...")
+            voxel_remesh_fallback(model, voxel_size=0.4)
             open_e, non_m = check_manifold(model)
-            print(f"  Post-hole-fill manifold: open_edges={open_e}, non_manifold_verts={non_m}")
+            print(f"  Post-remesh manifold: open_edges={open_e}, non_manifold_verts={non_m}")
 
     # ====================== FINAL MANIFOLD GATE ======================
     open_e, non_m = check_manifold(model)
@@ -627,11 +568,11 @@ try:
         clean_mesh(model, threshold=0.01, fill_holes=True, fix_normals=True)
         open_e, non_m = check_manifold(model)
         print(f"  After final repair: open_edges={open_e}, non_manifold_verts={non_m}")
-        if open_e > 0:
-            print("  Still non-manifold — applying UV-safe bmesh hole fill as last resort...")
-            bmesh_close_holes(model)
+        if open_e > 100:
+            print("  Still significantly non-manifold — applying last-resort voxel remesh...")
+            voxel_remesh_fallback(model, voxel_size=0.35)
             open_e, non_m = check_manifold(model)
-            print(f"  After bmesh_close_holes: open_edges={open_e}, non_manifold_verts={non_m}")
+            print(f"  After last-resort remesh: open_edges={open_e}, non_manifold_verts={non_m}")
 
     # ====================== EXPORT ======================
     bpy.ops.object.select_all(action='DESELECT')
