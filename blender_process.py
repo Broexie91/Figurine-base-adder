@@ -101,6 +101,10 @@ try:
     print("Arguments parsed successfully")
 
     bpy.ops.wm.read_factory_settings(use_empty=True)
+    
+    # 5.1 FIX: Marketiger requires strict scale definitions
+    bpy.context.scene.unit_settings.length_unit = 'MILLIMETERS'
+    bpy.context.scene.unit_settings.scale_length = 0.001
 
     # ====================== IMPORT GLB ======================
     print("Importeer GLB...")
@@ -124,6 +128,25 @@ try:
     scale_factor = desired_height_mm / current_height
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
+
+    # ====================== 3D PRINT TOOLBOX CLEANUP ======================
+    # Grok 5.1 optimization: Run native make_manifold to seal dirty meshes
+    print("Marketiger Manifold pas toepassen...")
+    try:
+        bpy.context.view_layer.objects.active = model
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        if hasattr(bpy.ops.mesh, "print3d_clean_non_manifold"):
+            bpy.ops.mesh.print3d_clean_non_manifold()
+            print("✅ print3d_clean_non_manifold toegepast")
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        if hasattr(bpy.ops.object, "print3d_make_manifold"):
+            bpy.ops.object.print3d_make_manifold()
+            print("✅ print3d_make_manifold toegepast")
+    except Exception as e:
+        print(f"⚠️ 3D Print Toolbox waarschuwing: {e}")
+        bpy.ops.object.mode_set(mode='OBJECT')
 
     # ====================== TEXTURE UITPAKKEN ======================
     out_dir = os.path.dirname(output_path)
@@ -326,19 +349,27 @@ try:
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     bpy.context.view_layer.objects.active = model
-    
-    # Triangulatie om Marketiger crash te voorkomen op Base caps
-    tri_mod = model.modifiers.new(name="Triangulate", type='TRIANGULATE')
-    bpy.ops.object.modifier_apply(modifier=tri_mod.name)
 
     print("Exporteren naar OBJ + MTL...")
-    bpy.ops.wm.obj_export(
-        filepath=output_path,
-        export_selected_objects=True,
-        export_materials=True,
-        path_mode='COPY',
-        export_uv=True
-    )
+    
+    # 5.1 FIX: export_triangulated_mesh & export_colors toegevoegd
+    export_kwargs = {
+        'filepath': output_path,
+        'export_selected_objects': True,
+        'export_materials': True,
+        'export_colors': True,
+        'export_normals': True,
+        'export_uv': True,
+        'path_mode': 'COPY'
+    }
+    
+    # Blender 5.1 export_triangulated_mesh switch via Try-Except
+    try:
+        export_kwargs['export_triangulated_mesh'] = True
+        bpy.ops.wm.obj_export(**export_kwargs)
+    except TypeError:
+        del export_kwargs['export_triangulated_mesh']
+        bpy.ops.wm.obj_export(**export_kwargs)
     print(f"Export voltooid: {output_path}")
 
     print("=== Blender processing finished successfully ===")
