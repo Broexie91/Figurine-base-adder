@@ -31,6 +31,14 @@ RUN wget -q https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/bl
     ln -s /opt/blender/blender /usr/local/bin/blender && \
     rm /tmp/blender.tar.xz
 
+# Enable the 3D Print Toolbox addon at build time so it's available in headless mode.
+# The addon ships with Blender but must be explicitly enabled in userpref.blend.
+# We do this by running a one-liner Blender script during the Docker build.
+RUN xvfb-run blender -b --python-expr \
+    "import addon_utils; addon_utils.enable('object_print3d_utils', default_set=True); \
+     import bpy; bpy.ops.wm.save_userpref()" \
+    || echo "WARNING: 3D Print Toolbox enable step failed — check Blender version compatibility"
+
 ENV BLENDER_SYSTEM_PYTHON=1
 
 # Werkdirectory en virtual environment
