@@ -114,6 +114,25 @@ def voxel_remesh_fallback(obj, voxel_size=0.4):
     print("✅ Voxel remesh applied")
 
 
+def repair_uvs(obj):
+    """
+    Re-projects UVs on the full mesh after boolean operations scramble
+    intersection seam faces. Uses Smart UV Project which is topology-agnostic
+    and handles newly created faces safely.
+    Preserves the existing UV layer name so the MTL reference stays intact.
+    """
+    bpy.context.view_layer.objects.active = obj
+    uv_name = obj.data.uv_layers.active.name if obj.data.uv_layers.active else "UVMap"
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.uv.smart_project(angle_limit=66, island_margin=0.02)
+    bpy.ops.object.mode_set(mode='OBJECT')
+    # Restore original UV layer name so material/MTL reference is unchanged
+    if obj.data.uv_layers.active:
+        obj.data.uv_layers.active.name = uv_name
+    print(f"  ✅ UV re-projected (layer: '{uv_name}')")
+
+
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     """
     Cascading Boolean fallback:
@@ -378,6 +397,10 @@ try:
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
 
+        # Repair UVs scrambled by boolean on intersection seam faces
+        print("Repairing UVs after base union...")
+        repair_uvs(model)
+
         # Final cleanup on unified mesh
         print("Running final seam cleanup...")
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
@@ -455,6 +478,10 @@ try:
 
         robust_boolean_union(model, torus, "Keychain_Union")
 
+        # Repair UVs scrambled by boolean on intersection seam faces
+        print("Repairing UVs after keychain union...")
+        repair_uvs(model)
+
         # Final cleanup on keychain seam
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
 
@@ -495,14 +522,14 @@ try:
     print("Exporting to OBJ + MTL...")
 
     export_kwargs = {
-        'filepath':               output_path,
+        'filepath':                output_path,
         'export_selected_objects': True,
         'export_materials':        True,
         # export_colors omitted: Marketiger may reject vertex colour data
         'export_normals':          True,
         'export_uv':               True,
-        'path_mode':               'COPY',
-        'global_scale':            1.0,   # model units are mm; keep 1:1
+        'path_mode':               'STRIP',  # outputs "model.png" not an absolute path in MTL
+        'global_scale':            1.0,      # model units are mm; keep 1:1
     }
 
     try:
@@ -511,6 +538,15 @@ try:
     except TypeError:
         del export_kwargs['export_triangulated_mesh']
         bpy.ops.wm.obj_export(**export_kwargs)
+
+    # Log MTL contents so texture reference can be verified in Railway logs
+    mtl_path = output_path.replace('.obj', '.mtl')
+    if os.path.exists(mtl_path):
+        with open(mtl_path, 'r') as f:
+            mtl_contents = f.read()
+        print(f"MTL contents:\n{mtl_contents}")
+    else:
+        print("⚠️  MTL file not found after export!")
 
     print(f"✅ Export complete: {output_path}")
     print("=== Blender processing finished successfully ===")
