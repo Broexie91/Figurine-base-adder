@@ -5,39 +5,10 @@ import os
 import traceback
 import bmesh
 from mathutils import Vector
-import addon_utils
-import importlib
-import importlib.util
 
-# Enable 3D Print Toolbox using bpy.utils.script_paths() — the correct Blender
-# API to locate bundled addons regardless of install path or version.
+# 3D Print Toolbox is a GUI addon and cannot be loaded in Blender headless/background mode.
+# All manifold repair is handled by bmesh operations instead.
 _print3d_available = False
-try:
-    # Ask Blender itself where its addon folders are
-    _addon_paths = bpy.utils.script_paths(subdir="addons")
-    _addon_paths += bpy.utils.script_paths(subdir="addons_contrib")
-    print(f"Blender addon search paths: {_addon_paths}")
-
-    for _p in _addon_paths:
-        _addon_dir = os.path.join(_p, "object_print3d_utils")
-        if os.path.isdir(_addon_dir):
-            print(f"✅ Found 3D Print Toolbox at: {_p}")
-            if _p not in sys.path:
-                sys.path.insert(0, _p)
-            break
-    else:
-        print("⚠️  object_print3d_utils folder not found in any Blender addon path")
-
-    addon_utils.enable("object_print3d_utils", default_set=False)
-
-    spec = importlib.util.find_spec("object_print3d_utils")
-    if spec is not None:
-        _print3d_available = True
-        print("✅ 3D Print Toolbox addon loaded successfully")
-    else:
-        print("⚠️  3D Print Toolbox still not importable — using bmesh fallbacks only")
-except Exception as e:
-    print(f"⚠️  3D Print Toolbox addon failed to load: {e} — using bmesh fallbacks only")
 
 print("=== BLENDER SCRIPT STARTED ===")
 print(f"Python version: {sys.version}")
@@ -405,25 +376,22 @@ try:
                 break
 
     if found_texture and img:
-        # Inject grey sentinel pixels
-        # Bottom-left corner → light grey (base/platform colour)
-        # Top-left corner    → dark grey  (text colour)
+        print(f"Injecting sentinel pixels and saving texture ({img.size[0]}x{img.size[1]})...")
+
+        # Use numpy for pixel manipulation — list(img.pixels) on a 2048x2048
+        # image copies 16M floats into Python memory and can stall for minutes.
+        import numpy as np
         w, h = img.size
-        pixels = list(img.pixels)
+        pixels = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(pixels)
+        pixels = pixels.reshape((h, w, 4))
 
-        for y in range(min(4, h)):
-            for x in range(min(4, w)):
-                idx = (y * w + x) * 4
-                if idx + 3 < len(pixels):
-                    pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3] = 0.75, 0.75, 0.75, 1.0
+        # Bottom-left 4x4: light grey (base/platform colour)
+        pixels[:min(4, h), :min(4, w), :] = [0.75, 0.75, 0.75, 1.0]
+        # Top-left 4x4: dark grey (text colour)
+        pixels[max(0, h - 4):h, :min(4, w), :] = [0.15, 0.15, 0.15, 1.0]
 
-        for y in range(max(0, h - 4), h):
-            for x in range(min(4, w)):
-                idx = (y * w + x) * 4
-                if idx + 3 < len(pixels):
-                    pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3] = 0.15, 0.15, 0.15, 1.0
-
-        img.pixels[:] = pixels
+        img.pixels.foreach_set(pixels.ravel())
         img.update()
         img.filepath_raw = texture_path
         img.file_format = 'PNG'
