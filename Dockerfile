@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxxf86vm1 \
     wget \
     xz-utils \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Officiële Blender 5.1 installeren (stabiel in headless mode)
@@ -31,9 +32,13 @@ RUN wget -q https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/bl
     ln -s /opt/blender/blender /usr/local/bin/blender && \
     rm /tmp/blender.tar.xz
 
-# The 3D Print Toolbox addon ships inside the Blender install folder.
-# blender_process.py locates and loads it directly by path at runtime,
-# so no preference-saving step is needed here.
+# Install the 3D Print Toolbox as a Blender Extension (4.2+ format, id: print3d_toolbox).
+# The zip unpacks directly to the extension root, so we extract into the named subfolder.
+ARG EXT_DIR=/root/.config/blender/5.1/extensions/user_default/print3d_toolbox
+COPY add-on-print3d-toolbox-v1.3.3.zip /tmp/print3d.zip
+RUN mkdir -p ${EXT_DIR} && \
+    unzip -q /tmp/print3d.zip -d ${EXT_DIR} && \
+    rm /tmp/print3d.zip
 
 ENV BLENDER_SYSTEM_PYTHON=1
 

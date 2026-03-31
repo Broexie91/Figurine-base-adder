@@ -7,7 +7,15 @@ import bmesh
 from mathutils import Vector
 import addon_utils
 
-addon_utils.enable("object_print3d_utils")
+# Blender 4.2+ extensions use the bl_ext.user_default.<id> naming convention.
+# Try both so the script works across older and newer Blender builds.
+for _addon_id in ("bl_ext.user_default.print3d_toolbox", "object_print3d_utils"):
+    try:
+        addon_utils.enable(_addon_id, default_set=True, persistent=True)
+        print(f"✅ Addon enabled: {_addon_id}")
+        break
+    except Exception as _e:
+        print(f"⚠️  Could not enable {_addon_id}: {_e}")
 
 print("=== BLENDER SCRIPT STARTED ===")
 print(f"Python version: {sys.version}")
