@@ -194,54 +194,41 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     print(f"  Target manifold check before boolean: open_edges={open_e}, non_manifold_verts={non_m}")
     vert_before = len(target_obj.data.vertices)
 
-    def _try_solver(solver_name, hole_tolerant=False):
+    def _try_solver(solver_name):
         mod = target_obj.modifiers.new(name=f"{modifier_name}_{solver_name}", type='BOOLEAN')
         mod.operation = 'UNION'
         mod.object = tool_obj
         mod.solver = solver_name
-        if hole_tolerant:
-            try:
-                mod.use_hole_tolerant = True
-            except Exception:
-                pass
-        bpy.ops.object.modifier_apply(modifier=mod.name)
-        new_verts = len(target_obj.data.vertices)
-        
-        # A successful boolean union often DECREASES vertex count because
-        # dense interior geometry (like feet inside a base) gets deleted.
-        # If it silently fails, the vertex count will remain exactly the same.
-        success = new_verts != vert_before
-        print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ silent failure'}")
-        return success
+        try:
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+            new_verts = len(target_obj.data.vertices)
+            
+            # FAST solver cleanly merges the geometries: vertex count will change.
+            # If it silent-fails, it does nothing so new_verts == vert_before.
+            success = new_verts != vert_before
+            print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ silent failure'}")
+            return success
+        except Exception as e:
+            print(f"  [{solver_name}] threw error: {e}")
+            return False
 
-    # --- Attempt 1: EXACT ---
-    if _try_solver('EXACT', hole_tolerant=True):
+    # --- Attempt 1: FAST (BMesh) ---
+    # We MUST use FAST. The EXACT solver attempts to globally resolve all self-intersections
+    # in the figurine (e.g. glasses intersecting face), which completely shreds
+    # non-manifold AI meshes into 'swiss cheese'. FAST only evaluates the local intersection.
+    if _try_solver('FAST'):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
 
-    print(f"⚠️  EXACT {modifier_name} ineffective. Trying FLOAT solver...")
-
-    # --- Attempt 2: FLOAT ---
-    if _try_solver('FLOAT'):
-        bpy.data.objects.remove(tool_obj, do_unlink=True)
-        return True
-
-    print(f"⚠️  FLOAT {modifier_name} also ineffective. Retrying EXACT with hole tolerance...")
-
-    # --- Attempt 3: EXACT again with hole tolerant ---
-    if _try_solver('EXACT', hole_tolerant=True):
-        bpy.data.objects.remove(tool_obj, do_unlink=True)
-        return True
-
-    # --- Attempt 4: JOIN (last resort) ---
-    print(f"🚨 All boolean attempts failed for {modifier_name}. Falling back to JOIN...")
+    # --- Attempt 2: JOIN (Fallback) ---
+    print(f"🚨 FAST boolean failed for {modifier_name}. Falling back to JOIN...")
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
     tool_obj.select_set(True)
     bpy.context.view_layer.objects.active = target_obj
     bpy.ops.object.join()
 
-    print(f"⚠️  {modifier_name} completed via JOIN (may have overlapping shells).")
+    print(f"⚠️  {modifier_name} completed via JOIN (overlapping shells left for slicer to auto-heal).")
     return False
 
 
