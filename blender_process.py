@@ -212,16 +212,16 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
             print(f"  [{solver_name}] threw error: {e}")
             return False
 
-    # --- Attempt 1: FAST (BMesh) ---
-    # We MUST use FAST. The EXACT solver attempts to globally resolve all self-intersections
+    # --- Attempt 1: FLOAT (BMesh) ---
+    # We MUST use FLOAT. The EXACT solver attempts to globally resolve all self-intersections
     # in the figurine (e.g. glasses intersecting face), which completely shreds
-    # non-manifold AI meshes into 'swiss cheese'. FAST only evaluates the local intersection.
-    if _try_solver('FAST'):
+    # non-manifold AI meshes into 'swiss cheese'. FLOAT only evaluates the local intersection.
+    if _try_solver('FLOAT'):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
 
     # --- Attempt 2: JOIN (Fallback) ---
-    print(f"🚨 FAST boolean failed for {modifier_name}. Falling back to JOIN...")
+    print(f"🚨 FLOAT boolean failed for {modifier_name}. Falling back to JOIN...")
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
     tool_obj.select_set(True)
