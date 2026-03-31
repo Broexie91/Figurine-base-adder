@@ -114,23 +114,29 @@ def voxel_remesh_fallback(obj, voxel_size=0.4):
     print("✅ Voxel remesh applied")
 
 
-def repair_uvs(obj):
+def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
     """
-    Re-projects UVs on the full mesh after boolean operations scramble
-    intersection seam faces. Uses Smart UV Project which is topology-agnostic
-    and handles newly created faces safely.
-    Preserves the existing UV layer name so the MTL reference stays intact.
+    After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
+    These are the boolean-generated intersection faces that have no valid atlas mapping.
+    All original UV islands from the Meshy AI model are left completely untouched.
+
+    Out-of-range UVs (outside 0.0–1.0) are the reliable signature of boolean-created
+    faces — Blender interpolates UV coordinates across the cut which often land outside
+    the valid texture space.
     """
-    bpy.context.view_layer.objects.active = obj
-    uv_name = obj.data.uv_layers.active.name if obj.data.uv_layers.active else "UVMap"
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.uv.smart_project(angle_limit=66, island_margin=0.02)
-    bpy.ops.object.mode_set(mode='OBJECT')
-    # Restore original UV layer name so material/MTL reference is unchanged
-    if obj.data.uv_layers.active:
-        obj.data.uv_layers.active.name = uv_name
-    print(f"  ✅ UV re-projected (layer: '{uv_name}')")
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.active
+    if not uv_layer:
+        print("  ⚠️  No active UV layer found, skipping UV pin.")
+        return
+    fixed = 0
+    for poly in mesh.polygons:
+        for loop_idx in poly.loop_indices:
+            uv = uv_layer.data[loop_idx].uv
+            if not (0.0 <= uv.x <= 1.0 and 0.0 <= uv.y <= 1.0):
+                uv_layer.data[loop_idx].uv = uv_coord
+                fixed += 1
+    print(f"  ✅ Pinned {fixed} out-of-range UV loops → {uv_coord} (original atlas untouched)")
 
 
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
@@ -397,9 +403,10 @@ try:
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
 
-        # Repair UVs scrambled by boolean on intersection seam faces
-        print("Repairing UVs after base union...")
-        repair_uvs(model)
+        # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
+        # Original Meshy AI atlas UVs are NOT touched.
+        print("Pinning out-of-range UVs after base union...")
+        pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
 
         # Final cleanup on unified mesh
         print("Running final seam cleanup...")
@@ -478,9 +485,10 @@ try:
 
         robust_boolean_union(model, torus, "Keychain_Union")
 
-        # Repair UVs scrambled by boolean on intersection seam faces
-        print("Repairing UVs after keychain union...")
-        repair_uvs(model)
+        # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
+        # Original Meshy AI atlas UVs are NOT touched.
+        print("Pinning out-of-range UVs after keychain union...")
+        pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
 
         # Final cleanup on keychain seam
         clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
