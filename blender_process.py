@@ -63,15 +63,17 @@ def check_manifold(obj):
     return len(open_edges), len(non_manifold_verts)
 
 
-def fill_and_fix(obj):
+def fill_and_fix(obj, threshold=0.001):
     """
-    Gentle mesh repair: ONLY fills open boundary holes and fixes normals.
-    Does NOT remove doubles, delete loose geometry, or delete interior faces.
+    Safe mesh repair for Meshy AI models:
+     - remove_doubles: welds garment shell vertices together, reducing open edges
+       from ~13K down to ~260 (critical for FLOAT boolean to work cleanly).
+     - fill_holes: closes remaining open boundary loops.
+     - normals_make_consistent: fixes inverted faces.
 
-    Meshy AI models have intentional overlapping geometry (glasses embedded in
-    the face, arms inside the shirt body). Ops like remove_doubles,
-    delete_loose, and delete_interior_faces misidentify this as defects and
-    punch visible holes through the mesh. This function is safe for them.
+    Intentionally excluded (they punch holes in AI mesh overlapping geometry):
+     - delete_interior_faces: removes faces behind glasses/shirt, creating holes.
+     - delete_loose: can remove small accessories floating nearby.
     """
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
@@ -79,8 +81,9 @@ def fill_and_fix(obj):
         bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.fill_holes(sides=0)          # close open boundary loops
-    bpy.ops.mesh.normals_make_consistent(inside=False)  # fix inverted faces
+    bpy.ops.mesh.remove_doubles(threshold=threshold)   # weld garment shells together
+    bpy.ops.mesh.fill_holes(sides=0)                   # close remaining open boundaries
+    bpy.ops.mesh.normals_make_consistent(inside=False) # fix inverted faces
     bpy.ops.object.mode_set(mode='OBJECT')
     print("✅ fill_and_fix applied", flush=True)
 
