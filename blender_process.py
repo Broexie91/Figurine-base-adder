@@ -251,13 +251,13 @@ def deep_repair(obj, max_iterations=3):
 
 
 
-def pin_new_face_uvs(obj, uv_coord=(0.002, 0.002)):
+def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
     Uses numpy foreach_get/foreach_set to avoid slow Python loops over all loops.
 
-    Note: uv_coord (0.002, 0.002) maps to approx pixel (4,4) on a 2048x texture,
-    which falls inside the 8x8 sentinel patch painted by PIL.
+    Note: uv_coord (0.008, 0.008) maps to pixel 16 on a 2048px texture,
+    squarely inside the 32x32 grey sentinel patch painted by PIL.
     """
     import numpy as np
     mesh = obj.data
@@ -482,16 +482,15 @@ try:
                     print(f"✅ Texture saved: {texture_path}")
 
                     # Step 2: Patch sentinel corner pixels via Pillow subprocess.
-                    # Sentinel patches are 8x8 pixels to ensure they cover
-                    # the UV coordinate (0.002, 0.002) on any texture size.
-                    # - Bottom-left 8×8 → light grey (RGB 191) = base colour
-                    # - Top-left 8×8   → dark grey  (RGB 38)  = text colour
+                    # Sentinel patch is 32x32 pixels so UV (0.008, 0.008) reliably
+                    # lands in the centre of the patch on any texture size ≥256px.
+                    # On 2048px: UV 0.008 * 2048 = pixel 16 — well inside the 32px patch.
+                    # - Bottom-left 32×32 → medium grey (RGB 160) = base colour
                     patch_script = (
                         "from PIL import Image, ImageDraw; "
                         f"img=Image.open(r'{texture_path}').convert('RGBA'); "
                         "d=ImageDraw.Draw(img); "
-                        "d.rectangle([0,0,7,7],   fill=(191,191,191,255)); "  # base: light grey
-                        "d.rectangle([0,img.height-8,7,img.height-1], fill=(38,38,38,255)); "  # text: dark grey
+                        "d.rectangle([0,0,31,31], fill=(160,160,160,255)); "  # base: medium grey
                         f"img.save(r'{texture_path}')"
                     )
                     try:
@@ -547,7 +546,7 @@ try:
             if base.data.uv_layers.active and model.data.uv_layers.active:
                 base.data.uv_layers.active.name = model.data.uv_layers.active.name
                 for loop in base.data.loops:
-                    base.data.uv_layers.active.data[loop.index].uv = (0.002, 0.002)
+                    base.data.uv_layers.active.data[loop.index].uv = (0.008, 0.008)
 
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
@@ -555,7 +554,7 @@ try:
         # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
         # Original Meshy AI atlas UVs are NOT touched.
         print("Pinning out-of-range UVs after base union...")
-        pin_new_face_uvs(model, uv_coord=(0.002, 0.002))
+        pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
 
         # Post-boolean repair on unified mesh
         if not skip_repair:
@@ -622,7 +621,7 @@ try:
             torus.data.materials.append(model.data.materials[0])
             if torus.data.uv_layers.active and model.data.uv_layers.active:
                 torus.data.uv_layers.active.name = model.data.uv_layers.active.name
-                fallback_uv = found_uv if found_uv is not None else (0.002, 0.998)
+                fallback_uv = found_uv if found_uv is not None else (0.008, 0.008)
                 for loop in torus.data.loops:
                     torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
 
@@ -630,7 +629,7 @@ try:
 
         # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
         print("Pinning out-of-range UVs after keychain union...")
-        pin_new_face_uvs(model, uv_coord=(0.002, 0.002))
+        pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
 
         # Post-boolean repair
         if not skip_repair:
