@@ -397,8 +397,12 @@ try:
         text_str = ""
     add_base       = argv[4].lower() == 'true' if len(argv) > 4 else True
     add_keychain   = argv[5].lower() == 'true' if len(argv) > 5 else False
+    skip_repair    = argv[6].lower() == 'true' if len(argv) > 6 else False
 
     desired_height_mm = size_cm * 10
+
+    if skip_repair:
+        print("⚡ SKIP_REPAIR mode: all mesh repair/fixing will be skipped", flush=True)
     base_thickness_mm = 2.5
 
     print("Arguments parsed successfully")
@@ -441,21 +445,24 @@ try:
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
     # ====================== MESH REPAIR (after scaling, thresholds in mm) ======================
-    print("Running mesh repair (bmesh.ops)...", flush=True)
-    open_e_pre, non_m_pre = check_manifold(model)
-    print(f"  Pre-repair manifold: open_edges={open_e_pre}, non_manifold_verts={non_m_pre}", flush=True)
+    if not skip_repair:
+        print("Running mesh repair (bmesh.ops)...", flush=True)
+        open_e_pre, non_m_pre = check_manifold(model)
+        print(f"  Pre-repair manifold: open_edges={open_e_pre}, non_manifold_verts={non_m_pre}", flush=True)
 
-    repair_mesh(model, merge_threshold=0.01)  # 0.01mm = 10 microns
+        repair_mesh(model, merge_threshold=0.01)  # 0.01mm = 10 microns
 
-    open_e, non_m = check_manifold(model)
-    print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
-
-    # If still many open edges, try a more aggressive merge (0.05mm)
-    if open_e > 100:
-        print("  ⚠️ Still many open edges, trying aggressive merge at 0.05mm...", flush=True)
-        repair_mesh(model, merge_threshold=0.05)
         open_e, non_m = check_manifold(model)
-        print(f"  Post-aggressive-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+        print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+        # If still many open edges, try a more aggressive merge (0.05mm)
+        if open_e > 100:
+            print("  ⚠️ Still many open edges, trying aggressive merge at 0.05mm...", flush=True)
+            repair_mesh(model, merge_threshold=0.05)
+            open_e, non_m = check_manifold(model)
+            print(f"  Post-aggressive-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+    else:
+        print("⚡ Skipping mesh repair (skip_repair=true)", flush=True)
 
     # ====================== TEXTURE EXPORT ======================
     out_dir = os.path.dirname(output_path)
@@ -586,11 +593,12 @@ try:
         pin_new_face_uvs(model, uv_coord=(0.002, 0.002))
 
         # Post-boolean repair on unified mesh
-        print("Running post-boolean repair...")
-        repair_mesh(model, merge_threshold=0.01)
+        if not skip_repair:
+            print("Running post-boolean repair...")
+            repair_mesh(model, merge_threshold=0.01)
 
-        open_e, non_m = check_manifold(model)
-        print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+            open_e, non_m = check_manifold(model)
+            print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
         print("✅ Base architecture complete!", flush=True)
 
@@ -660,41 +668,44 @@ try:
         pin_new_face_uvs(model, uv_coord=(0.002, 0.002))
 
         # Post-boolean repair
-        repair_mesh(model, merge_threshold=0.01)
+        if not skip_repair:
+            repair_mesh(model, merge_threshold=0.01)
 
-        open_e, non_m = check_manifold(model)
-        print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+            open_e, non_m = check_manifold(model)
+            print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== FINAL MANIFOLD GATE ======================
-
-    open_e, non_m = check_manifold(model)
-    print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
-
-    if open_e > 0:
-        print("⚠️  Model is still non-manifold. Escalating repair...", flush=True)
-
-        # Escalation 1: aggressive merge + fill
-        repair_mesh(model, merge_threshold=0.05)
+    if not skip_repair:
         open_e, non_m = check_manifold(model)
-        print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+        print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
 
-    if open_e > 0:
-        # Escalation 2: deep repair — handles wire edges, interior faces,
-        # and uses bpy.ops select_non_manifold + fill iteratively
-        print("  ⚠️ Still non-manifold. Running deep_repair...", flush=True)
-        deep_repair(model, max_iterations=5)
-        open_e, non_m = check_manifold(model)
-        print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+        if open_e > 0:
+            print("⚠️  Model is still non-manifold. Escalating repair...", flush=True)
 
-    if open_e > 0:
-        # Escalation 3: last resort aggressive merge
-        print("  ⚠️ Still non-manifold. Trying 0.1mm merge threshold...", flush=True)
-        repair_mesh(model, merge_threshold=0.1)
-        open_e, non_m = check_manifold(model)
-        print(f"  After 0.1mm merge: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+            # Escalation 1: aggressive merge + fill
+            repair_mesh(model, merge_threshold=0.05)
+            open_e, non_m = check_manifold(model)
+            print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-    if open_e > 0:
-        print(f"  🚨 WARNING: Exporting with {open_e} open edges. Model may have visible holes.", flush=True)
+        if open_e > 0:
+            # Escalation 2: deep repair — handles wire edges, interior faces,
+            # and uses bpy.ops select_non_manifold + fill iteratively
+            print("  ⚠️ Still non-manifold. Running deep_repair...", flush=True)
+            deep_repair(model, max_iterations=5)
+            open_e, non_m = check_manifold(model)
+            print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+        if open_e > 0:
+            # Escalation 3: last resort aggressive merge
+            print("  ⚠️ Still non-manifold. Trying 0.1mm merge threshold...", flush=True)
+            repair_mesh(model, merge_threshold=0.1)
+            open_e, non_m = check_manifold(model)
+            print(f"  After 0.1mm merge: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+        if open_e > 0:
+            print(f"  🚨 WARNING: Exporting with {open_e} open edges. Model may have visible holes.", flush=True)
+    else:
+        print("⚡ Skipping manifold gate (skip_repair=true)", flush=True)
 
     # ====================== TRIANGULATE ======================
     # Guarantee all faces are triangles — ngons from fill_holes can cause

@@ -34,8 +34,12 @@ class BaseRequest(BaseModel):
     add_base: bool = True
     add_keychain: bool = False
 
-@app.post("/add-base")
-async def add_base(request: BaseRequest):
+
+async def _process_model(request: BaseRequest, skip_repair: bool = False):
+    """
+    Shared logic for both /add-base and /add-base-raw endpoints.
+    Downloads the GLB, runs Blender, and returns a ZIP response.
+    """
     # Validatie van de input
     if request.size_cm not in [6, 8, 10]:
         raise HTTPException(status_code=400, detail="size_cm moet 6, 8 of 10 zijn")
@@ -68,7 +72,7 @@ async def add_base(request: BaseRequest):
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
             str(input_glb), str(output_obj), str(request.size_cm), text_arg,
-            str(request.add_base), str(request.add_keychain)
+            str(request.add_base), str(request.add_keychain), str(skip_repair)
         ]
 
         try:
@@ -124,3 +128,19 @@ async def add_base(request: BaseRequest):
         except Exception as e:
             print(f"Unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Onverwachte fout: {str(e)}")
+
+
+@app.post("/add-base")
+async def add_base(request: BaseRequest):
+    """Process GLB model with full mesh repair pipeline."""
+    return await _process_model(request, skip_repair=False)
+
+
+@app.post("/add-base-raw")
+async def add_base_raw(request: BaseRequest):
+    """
+    Process GLB model WITHOUT mesh repair.
+    Only does: import, scale, base/text/keychain, texture export, OBJ export.
+    Lets Marketiger handle all mesh fixing and hole repair.
+    """
+    return await _process_model(request, skip_repair=True)
