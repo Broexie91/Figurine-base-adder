@@ -43,7 +43,7 @@ async def add_base(request: BaseRequest):
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         input_glb = tmp_path / "input.glb"
-        output_obj = tmp_path / "output.obj"
+        output_obj = tmp_path / "model.obj"
 
         # 1. Download model
         try:

@@ -148,6 +148,109 @@ def repair_mesh(obj, merge_threshold=0.01):
     return stats
 
 
+def deep_repair(obj, max_iterations=3):
+    """
+    Second-stage repair for non-manifold edges that holes_fill can't fix.
+
+    These are typically:
+      - Wire edges (not connected to any face)
+      - Loose vertices
+      - Interior/duplicate faces (edges shared by >2 faces)
+
+    Uses a combination of bmesh direct deletion and bpy.ops as fallback.
+    """
+    print("  Running deep_repair...", flush=True)
+
+    # Stage 1: bmesh — delete wire edges and loose verts
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+
+    # Delete wire edges (edges not connected to any face)
+    wire_edges = [e for e in bm.edges if e.is_wire]
+    if wire_edges:
+        bmesh.ops.delete(bm, geom=wire_edges, context='EDGES')
+        print(f"    Deleted {len(wire_edges)} wire edges", flush=True)
+
+    # Delete loose verts (not connected to any edge)
+    bm.verts.ensure_lookup_table()
+    loose_verts = [v for v in bm.verts if not v.link_edges]
+    if loose_verts:
+        bmesh.ops.delete(bm, geom=loose_verts, context='VERTS')
+        print(f"    Deleted {len(loose_verts)} loose vertices", flush=True)
+
+    # Delete interior faces: faces where ALL edges are shared by >2 faces.
+    # These are truly invisible interior geometry that causes non-manifold issues.
+    bm.faces.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    interior_faces = []
+    for f in bm.faces:
+        if all(len(e.link_faces) > 2 for e in f.edges):
+            interior_faces.append(f)
+    if interior_faces:
+        bmesh.ops.delete(bm, geom=interior_faces, context='FACES')
+        print(f"    Deleted {len(interior_faces)} interior faces", flush=True)
+
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+    # Stage 2: bpy.ops iterative repair (works under xvfb-run)
+    # select_non_manifold finds problematic geometry that bmesh.ops missed,
+    # then we fill/merge/dissolve iteratively.
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    if obj.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    for iteration in range(max_iterations):
+        open_e, _ = check_manifold(obj)
+        if open_e == 0:
+            print(f"    ✅ Mesh is manifold after iteration {iteration}", flush=True)
+            break
+
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='DESELECT')
+
+        # Select non-manifold geometry
+        bpy.ops.mesh.select_non_manifold(
+            extend=False,
+            use_wire=True,
+            use_boundary=True,
+            use_multi_face=True,
+            use_non_contiguous=True,
+            use_verts=True
+        )
+
+        # Try to fill selected non-manifold regions
+        try:
+            bpy.ops.mesh.fill()
+        except RuntimeError:
+            pass  # fill can fail if selection isn't suitable
+
+        # Merge nearby verts in the problem area
+        bpy.ops.mesh.remove_doubles(threshold=0.05)
+
+        # Recalculate normals
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.normals_make_consistent(inside=False)
+
+        # Fill remaining holes
+        bpy.ops.mesh.fill_holes(sides=0)
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        open_e_after, _ = check_manifold(obj)
+        print(f"    Iteration {iteration + 1}: open_edges {open_e} → {open_e_after}", flush=True)
+
+        if open_e_after >= open_e:
+            # No progress, stop iterating
+            break
+        open_e = open_e_after
+
+
+
 def pin_new_face_uvs(obj, uv_coord=(0.002, 0.002)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
@@ -576,7 +679,15 @@ try:
         print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     if open_e > 0:
-        # Escalation 2: try even more aggressive merge (0.1mm)
+        # Escalation 2: deep repair — handles wire edges, interior faces,
+        # and uses bpy.ops select_non_manifold + fill iteratively
+        print("  ⚠️ Still non-manifold. Running deep_repair...", flush=True)
+        deep_repair(model, max_iterations=5)
+        open_e, non_m = check_manifold(model)
+        print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+    if open_e > 0:
+        # Escalation 3: last resort aggressive merge
         print("  ⚠️ Still non-manifold. Trying 0.1mm merge threshold...", flush=True)
         repair_mesh(model, merge_threshold=0.1)
         open_e, non_m = check_manifold(model)
