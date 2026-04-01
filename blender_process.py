@@ -123,7 +123,7 @@ def build_convex_base(foot_verts, bmin_z, thickness_mm, margin_mm=3.0,
     from mathutils.geometry import convex_hull_2d
 
     # --- 1. Convex hull (with optional CoM anchor) ---
-    xy_vecs = [Vector((v.x, v.y, 0.0)) for v in foot_verts]
+    xy_vecs = [Vector((v.x, v.y)) for v in foot_verts]
 
     # Check whether the CoM projection is already inside the foot hull.
     # If not, inject it so the hull expands to envelope the CoM.
@@ -135,7 +135,7 @@ def build_convex_base(foot_verts, bmin_z, thickness_mm, margin_mm=3.0,
             if not point_in_polygon_2d(com_xy, initial_poly):
                 print(f"  ⚠️  CoM ({com_xy.x:.1f}, {com_xy.y:.1f}mm) is outside foot hull — "
                       f"expanding to include it.", flush=True)
-                xy_vecs.append(Vector((com_xy.x, com_xy.y, 0.0)))
+                xy_vecs.append(Vector((com_xy.x, com_xy.y)))
             else:
                 # Measure closest distance to any edge for info
                 print(f"  ✅ CoM ({com_xy.x:.1f}, {com_xy.y:.1f}mm) is inside foot hull.",
