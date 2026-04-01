@@ -52,12 +52,68 @@ def get_feet_verts(obj, height_mm):
     return feet, bmin_z
 
 
-def build_convex_base(foot_verts, bmin_z, thickness_mm, margin_mm=3.0, min_radius_mm=15.0):
+def compute_com(obj):
+    """
+    Compute the centre of mass of a mesh as an area-weighted triangle centroid.
+    This is more accurate than a simple vertex centroid for non-uniform meshes
+    (e.g. asymmetric poses where one arm/leg dominates a region).
+    Returns a Vector (world space).
+    """
+    mesh = obj.data
+    mw   = obj.matrix_world
+
+    total_area = 0.0
+    weighted   = Vector((0.0, 0.0, 0.0))
+
+    # Iterate triangulated polygons
+    for poly in mesh.polygons:
+        verts_world = [mw @ mesh.vertices[vi].co for vi in poly.vertices]
+        # Fan-triangulate the face
+        v0 = verts_world[0]
+        for i in range(1, len(verts_world) - 1):
+            v1 = verts_world[i]
+            v2 = verts_world[i + 1]
+            area       = ((v1 - v0).cross(v2 - v0)).length / 2.0
+            centroid   = (v0 + v1 + v2) / 3.0
+            weighted  += centroid * area
+            total_area += area
+
+    if total_area < 1e-12:
+        # Degenerate — fall back to vertex centroid
+        all_v = [mw @ v.co for v in mesh.vertices]
+        return sum(all_v, Vector()) / len(all_v)
+
+    return weighted / total_area
+
+
+def point_in_polygon_2d(point, polygon):
+    """
+    Ray-casting point-in-polygon test (XY plane).
+    polygon: list of Vector with .x / .y attributes.
+    Returns True if point is strictly inside.
+    """
+    x, y   = point.x, point.y
+    n      = len(polygon)
+    inside = False
+    px, py = polygon[-1].x, polygon[-1].y
+    for i in range(n):
+        qx, qy = polygon[i].x, polygon[i].y
+        if ((py > y) != (qy > y)) and (x < (qx - px) * (y - py) / (qy - py + 1e-12) + px):
+            inside = not inside
+        px, py = qx, qy
+    return inside
+
+
+def build_convex_base(foot_verts, bmin_z, thickness_mm, margin_mm=3.0,
+                      min_radius_mm=15.0, com_xy=None):
     """
     Build a minimal convex hull base mesh from the figurine's foot vertices.
 
     Steps:
       1. Compute 2D convex hull of foot XY positions.
+         If com_xy (centre-of-mass projected to XY) lies outside the initial
+         hull, it is added as an extra anchor point so the hull automatically
+         expands to include it — preventing asymmetric poses from tipping.
       2. Expand hull outward from its centroid by margin_mm.
       3. Enforce a minimum inscribed radius of min_radius_mm.
       4. Extrude the hull polygon into a solid prism with bmesh.
@@ -66,8 +122,25 @@ def build_convex_base(foot_verts, bmin_z, thickness_mm, margin_mm=3.0, min_radiu
     """
     from mathutils.geometry import convex_hull_2d
 
-    # --- 1. Convex hull ----
+    # --- 1. Convex hull (with optional CoM anchor) ---
     xy_vecs = [Vector((v.x, v.y, 0.0)) for v in foot_verts]
+
+    # Check whether the CoM projection is already inside the foot hull.
+    # If not, inject it so the hull expands to envelope the CoM.
+    if com_xy is not None:
+        # Quick initial hull to test
+        initial_indices = convex_hull_2d(xy_vecs)
+        if len(initial_indices) >= 3:
+            initial_poly = [Vector((xy_vecs[i].x, xy_vecs[i].y)) for i in initial_indices]
+            if not point_in_polygon_2d(com_xy, initial_poly):
+                print(f"  ⚠️  CoM ({com_xy.x:.1f}, {com_xy.y:.1f}mm) is outside foot hull — "
+                      f"expanding to include it.", flush=True)
+                xy_vecs.append(Vector((com_xy.x, com_xy.y, 0.0)))
+            else:
+                # Measure closest distance to any edge for info
+                print(f"  ✅ CoM ({com_xy.x:.1f}, {com_xy.y:.1f}mm) is inside foot hull.",
+                      flush=True)
+
     hull_indices = convex_hull_2d(xy_vecs)
 
     if len(hull_indices) < 3:
@@ -635,12 +708,18 @@ try:
             foot_bmin_z = bmin.z
             print("  ⚠️  No foot vertices found, using all vertices as fallback.", flush=True)
 
+        # Compute centre of mass and project to XY for stability check
+        com_world = compute_com(model)
+        com_xy    = Vector((com_world.x, com_world.y))
+        print(f"  Centre of mass (XY): ({com_xy.x:.1f}, {com_xy.y:.1f})mm", flush=True)
+
         base = build_convex_base(
             foot_verts,
             bmin_z        = foot_bmin_z,
             thickness_mm  = base_thickness_mm,
             margin_mm     = 3.0,
             min_radius_mm = 15.0,
+            com_xy        = com_xy,
         )
 
         if len(model.data.materials) > 0:
