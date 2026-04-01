@@ -33,19 +33,120 @@ def get_bounds(objs):
     return bmin, bmax
 
 
-def get_feet_bounds(obj, z_threshold_mm=5.0):
+def get_feet_verts(obj, height_mm):
+    """
+    Returns a list of world-space Vector positions of vertices near the bottom
+    of the model, used as input for the convex hull base.
+
+    Z-threshold is proportional: max(5mm, height_mm * 4%) so taller models
+    sample a bit more and narrow-stance models stay precise.
+    """
+    z_threshold_mm = max(5.0, height_mm * 0.04)
     mesh = obj.data
     verts = [obj.matrix_world @ v.co for v in mesh.vertices]
     if not verts:
-        return None, None
+        return [], float('inf')
     bmin_z = min(v.z for v in verts)
     feet = [v for v in verts if v.z <= bmin_z + z_threshold_mm]
-    if not feet:
-        return None, None
-    return (
-        Vector((min(v.x for v in feet), min(v.y for v in feet), bmin_z)),
-        Vector((max(v.x for v in feet), max(v.y for v in feet), bmin_z)),
-    )
+    print(f"  Foot vertices: {len(feet)} (Z-threshold={z_threshold_mm:.1f}mm)", flush=True)
+    return feet, bmin_z
+
+
+def build_convex_base(foot_verts, bmin_z, thickness_mm, margin_mm=3.0, min_radius_mm=15.0):
+    """
+    Build a minimal convex hull base mesh from the figurine's foot vertices.
+
+    Steps:
+      1. Compute 2D convex hull of foot XY positions.
+      2. Expand hull outward from its centroid by margin_mm.
+      3. Enforce a minimum inscribed radius of min_radius_mm.
+      4. Extrude the hull polygon into a solid prism with bmesh.
+
+    Returns the Blender object for the base, ready for boolean union.
+    """
+    from mathutils.geometry import convex_hull_2d
+
+    # --- 1. Convex hull ----
+    xy_vecs = [Vector((v.x, v.y, 0.0)) for v in foot_verts]
+    hull_indices = convex_hull_2d(xy_vecs)
+
+    if len(hull_indices) < 3:
+        # Degenerate — fall back to a circle
+        print("  ⚠️  Convex hull degenerate (<3 pts), using min_radius circle.", flush=True)
+        hull_pts = []
+        steps = 32
+        cx = sum(v.x for v in foot_verts) / len(foot_verts)
+        cy = sum(v.y for v in foot_verts) / len(foot_verts)
+        for i in range(steps):
+            a = 2 * math.pi * i / steps
+            hull_pts.append(Vector((cx + min_radius_mm * math.cos(a),
+                                     cy + min_radius_mm * math.sin(a))))
+    else:
+        hull_pts = [Vector((xy_vecs[i].x, xy_vecs[i].y)) for i in hull_indices]
+
+    # --- 2. Centroid and outward offset ---
+    cx = sum(p.x for p in hull_pts) / len(hull_pts)
+    cy = sum(p.y for p in hull_pts) / len(hull_pts)
+
+    expanded = []
+    for p in hull_pts:
+        dx, dy = p.x - cx, p.y - cy
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < 1e-6:
+            expanded.append(Vector((p.x, p.y)))
+        else:
+            scale = (dist + margin_mm) / dist
+            expanded.append(Vector((cx + dx * scale, cy + dy * scale)))
+
+    # --- 3. Minimum radius guard ---
+    max_dist = max(math.sqrt((p.x - cx)**2 + (p.y - cy)**2) for p in expanded)
+    if max_dist < min_radius_mm:
+        print(f"  ⚠️  Hull radius {max_dist:.1f}mm < min {min_radius_mm}mm, scaling up.", flush=True)
+        scale = min_radius_mm / max_dist
+        expanded = [Vector((cx + (p.x - cx) * scale, cy + (p.y - cy) * scale))
+                    for p in expanded]
+        max_dist = min_radius_mm
+
+    print(f"  Convex hull base: {len(expanded)} vertices, max_radius={max_dist:.1f}mm, "
+          f"margin={margin_mm}mm", flush=True)
+
+    # --- 4. Build solid prism with bmesh ---
+    top_z    = bmin_z + 0.5          # slightly inside the foot for clean boolean
+    bottom_z = bmin_z - thickness_mm
+
+    bm = bmesh.new()
+
+    # Top ring (UV=bottom-left sentinel)
+    top_verts = [bm.verts.new(Vector((p.x, p.y, top_z))) for p in expanded]
+    # Bottom ring
+    bot_verts = [bm.verts.new(Vector((p.x, p.y, bottom_z))) for p in expanded]
+
+    n = len(expanded)
+
+    # Side faces (quads)
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new([top_verts[i], top_verts[j], bot_verts[j], bot_verts[i]])
+
+    # Top face
+    bm.faces.new(top_verts)
+
+    # Bottom face (reversed winding so normal points down)
+    bm.faces.new(list(reversed(bot_verts)))
+
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+
+    # Create the Blender mesh object
+    base_mesh = bpy.data.meshes.new("ConvexBase")
+    bm.to_mesh(base_mesh)
+    bm.free()
+
+    base_obj = bpy.data.objects.new("ConvexBase", base_mesh)
+    bpy.context.collection.objects.link(base_obj)
+    bpy.context.view_layer.objects.active = base_obj
+    base_obj.select_set(True)
+
+    return base_obj
 
 
 def check_manifold(obj):
@@ -520,40 +621,34 @@ try:
     if not found_texture:
         print("⚠️  No embedded texture found.")
 
-    # ====================== BASE + TEXT ======================
+    # ====================== BASE ======================
     bmin, bmax = get_bounds([model])
-    fmin, fmax = get_feet_bounds(model)
-
-    if fmin and fmax:
-        center_x = (fmin.x + fmax.x) / 2
-        center_y = (fmin.y + fmax.y) / 2
-        radius   = max(fmax.x - fmin.x, fmax.y - fmin.y) / 2 * 1.35
-    else:
-        center_x = (bmin.x + bmax.x) / 2
-        center_y = (bmin.y + bmax.y) / 2
-        radius   = max(bmax.x - bmin.x, bmax.y - bmin.y) / 2 * 0.95
 
     if add_base:
-        print("Adding base via boolean union pipeline...")
+        print("Adding convex hull base...", flush=True)
 
-        adjusted_depth = base_thickness_mm + 0.5
-        adj_z = bmin.z - adjusted_depth / 2 + 0.5
+        foot_verts, foot_bmin_z = get_feet_verts(model, desired_height_mm)
 
-        bpy.ops.mesh.primitive_cylinder_add(
-            vertices=64,
-            radius=radius,
-            depth=adjusted_depth,
-            location=(center_x, center_y, adj_z),
-            calc_uvs=True,
+        if not foot_verts:
+            # Absolute fallback: no vertices found at all
+            foot_verts = [model.matrix_world @ v.co for v in model.data.vertices]
+            foot_bmin_z = bmin.z
+            print("  ⚠️  No foot vertices found, using all vertices as fallback.", flush=True)
+
+        base = build_convex_base(
+            foot_verts,
+            bmin_z        = foot_bmin_z,
+            thickness_mm  = base_thickness_mm,
+            margin_mm     = 3.0,
+            min_radius_mm = 15.0,
         )
-        base = bpy.context.active_object
 
         if len(model.data.materials) > 0:
             base.data.materials.append(model.data.materials[0])
-            if base.data.uv_layers.active and model.data.uv_layers.active:
-                base.data.uv_layers.active.name = model.data.uv_layers.active.name
-                for loop in base.data.loops:
-                    base.data.uv_layers.active.data[loop.index].uv = (0.008, 0.008)
+            uv_layer = base.data.uv_layers.new(name=model.data.uv_layers.active.name
+                                                if model.data.uv_layers.active else "UVMap")
+            for loop in base.data.loops:
+                uv_layer.data[loop.index].uv = (0.008, 0.008)
 
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
