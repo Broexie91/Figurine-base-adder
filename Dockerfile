@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxfixes3 \
     libxxf86vm1 \
+    libx11-6 \
+    libxrandr2 \
+    libxcursor1 \
     wget \
     xz-utils \
     unzip \

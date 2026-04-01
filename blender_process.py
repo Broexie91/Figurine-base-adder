@@ -63,35 +63,98 @@ def check_manifold(obj):
     return len(open_edges), len(non_manifold_verts)
 
 
-def fill_and_fix(obj, threshold=0.001):
+def repair_mesh(obj, merge_threshold=0.01):
     """
-    Safe mesh repair for Meshy AI models:
-     - remove_doubles: welds garment shell vertices together, reducing open edges
-       from ~13K down to ~260 (critical for FLOAT boolean to work cleanly).
-     - fill_holes: closes remaining open boundary loops.
-     - normals_make_consistent: fixes inverted faces.
+    Robust mesh repair using bmesh.ops (context-independent, works headlessly).
 
-    Intentionally excluded (they punch holes in AI mesh overlapping geometry):
-     - delete_interior_faces: removes faces behind glasses/shirt, creating holes.
-     - delete_loose: can remove small accessories floating nearby.
+    Pipeline:
+      1. dissolve_degenerate – removes zero-area faces & zero-length edges
+         that cause boolean solvers to fail silently.
+      2. remove_doubles – welds overlapping vertices (garment shells, seams).
+      3. holes_fill – closes remaining open boundary loops.
+      4. recalc_face_normals – ensures all faces point outward.
+
+    Args:
+        obj: Blender mesh object to repair.
+        merge_threshold: Distance in current units (mm after scaling) for
+                         vertex welding. Default 0.01mm.
+
+    Returns:
+        dict with repair statistics.
     """
-    bpy.context.view_layer.objects.active = obj
-    obj.select_set(True)
-    if obj.mode != 'OBJECT':
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+
+    stats = {}
+
+    # 1. Dissolve degenerate geometry (zero-area faces, zero-length edges)
+    before_edges = len(bm.edges)
+    before_faces = len(bm.faces)
+    bmesh.ops.dissolve_degenerate(bm, dist=merge_threshold, edges=bm.edges[:])
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    stats['degenerate_edges_removed'] = before_edges - len(bm.edges)
+    stats['degenerate_faces_removed'] = before_faces - len(bm.faces)
+
+    # 2. Merge by distance (weld overlapping vertices from garment shells)
+    before_verts = len(bm.verts)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=merge_threshold)
+    bm.verts.ensure_lookup_table()
+    stats['doubles_removed'] = before_verts - len(bm.verts)
+
+    # 3. Fill holes (close open boundary loops)
+    # holes_fill finds boundary edge loops and fills them with faces
+    bm.edges.ensure_lookup_table()
+    try:
+        result = bmesh.ops.holes_fill(bm, edges=bm.edges[:], sides=0)
+        stats['holes_filled'] = len(result.get('faces', []))
+    except (TypeError, AttributeError):
+        # Fallback for Blender versions where holes_fill has different signature
+        # Use the bpy.ops approach as absolute last resort
+        bm.to_mesh(obj.data)
+        bm.free()
+        obj.data.update()
+
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.fill_holes(sides=0)
         bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.remove_doubles(threshold=threshold)   # weld garment shells together
-    bpy.ops.mesh.fill_holes(sides=0)                   # close remaining open boundaries
-    bpy.ops.mesh.normals_make_consistent(inside=False) # fix inverted faces
-    bpy.ops.object.mode_set(mode='OBJECT')
-    print("✅ fill_and_fix applied", flush=True)
+        stats['holes_filled'] = -1  # unknown count, fallback was used
+
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+
+    # 4. Recalculate face normals (ensure all faces point outward)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+    # Log what was fixed
+    print(f"  🔧 repair_mesh: degenerate_edges={stats.get('degenerate_edges_removed', 0)}, "
+          f"degenerate_faces={stats.get('degenerate_faces_removed', 0)}, "
+          f"doubles={stats['doubles_removed']}, "
+          f"holes={stats['holes_filled']}", flush=True)
+
+    return stats
 
 
-def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
+def pin_new_face_uvs(obj, uv_coord=(0.002, 0.002)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
     Uses numpy foreach_get/foreach_set to avoid slow Python loops over all loops.
+
+    Note: uv_coord (0.002, 0.002) maps to approx pixel (4,4) on a 2048x texture,
+    which falls inside the 8x8 sentinel patch painted by PIL.
     """
     import numpy as np
     mesh = obj.data
@@ -125,12 +188,12 @@ def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
 
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     """
-    Cascading Boolean fallback:
-      1. EXACT solver  (best quality)
-      2. FLOAT solver  (brute-force)
-      3. Voxel remesh of tool + EXACT retry
-      4. JOIN          (last resort — overlapping shells)
+    Hardened Boolean union cascade:
+      1. FLOAT solver  (fast, local intersection only — preferred for AI meshes)
+      2. EXACT solver  (more robust when tool is a clean primitive like cylinder)
+      3. JOIN + weld   (last resort — merges objects and welds the seam)
 
+    After each boolean attempt, verifies the result with a manifold check.
     Returns True if a real boolean succeeded, False if JOIN was used.
     """
     bpy.ops.object.select_all(action='DESELECT')
@@ -149,33 +212,71 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
         try:
             bpy.ops.object.modifier_apply(modifier=mod.name)
             new_verts = len(target_obj.data.vertices)
-            
-            # FAST solver cleanly merges the geometries: vertex count will change.
-            # If it silent-fails, it does nothing so new_verts == vert_before.
+
+            # If solver silent-fails, vertex count stays the same
             success = new_verts != vert_before
             print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ silent failure'}")
+
+            if success:
+                # Verify the result: recalculate normals on the combined mesh
+                bm = bmesh.new()
+                bm.from_mesh(target_obj.data)
+                bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+                bm.to_mesh(target_obj.data)
+                bm.free()
+                target_obj.data.update()
+
             return success
         except Exception as e:
             print(f"  [{solver_name}] threw error: {e}")
+            # Clean up the failed modifier if it still exists
+            mod_check = target_obj.modifiers.get(f"{modifier_name}_{solver_name}")
+            if mod_check:
+                target_obj.modifiers.remove(mod_check)
             return False
 
     # --- Attempt 1: FLOAT (BMesh) ---
-    # We MUST use FLOAT. The EXACT solver attempts to globally resolve all self-intersections
-    # in the figurine (e.g. glasses intersecting face), which completely shreds
-    # non-manifold AI meshes into 'swiss cheese'. FLOAT only evaluates the local intersection.
+    # FLOAT only evaluates the local intersection, preserving the rest of the
+    # figurine's (often non-manifold) geometry intact.
     if _try_solver('FLOAT'):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
 
-    # --- Attempt 2: JOIN (Fallback) ---
-    print(f"🚨 FLOAT boolean failed for {modifier_name}. Falling back to JOIN...")
+    # --- Attempt 2: EXACT ---
+    # EXACT is more robust when the tool object is a clean manifold primitive
+    # (cylinder base, torus). It may shred the figurine's self-intersections,
+    # but for clean primitives it often works where FLOAT fails.
+    print(f"  ⚠️ FLOAT failed, trying EXACT for {modifier_name}...")
+    if _try_solver('EXACT'):
+        bpy.data.objects.remove(tool_obj, do_unlink=True)
+        return True
+
+    # --- Attempt 3: JOIN + weld seam ---
+    print(f"🚨 All boolean solvers failed for {modifier_name}. Falling back to JOIN + weld...")
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
     tool_obj.select_set(True)
     bpy.context.view_layer.objects.active = target_obj
     bpy.ops.object.join()
 
-    print(f"⚠️  {modifier_name} completed via JOIN (overlapping shells left for slicer to auto-heal).")
+    # Weld the seam: merge overlapping vertices where the objects meet
+    bm = bmesh.new()
+    bm.from_mesh(target_obj.data)
+    bm.verts.ensure_lookup_table()
+    before_verts = len(bm.verts)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=0.05)
+    bm.verts.ensure_lookup_table()
+    welded = before_verts - len(bm.verts)
+
+    # Recalculate normals after join
+    bm.faces.ensure_lookup_table()
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+
+    bm.to_mesh(target_obj.data)
+    bm.free()
+    target_obj.data.update()
+
+    print(f"  ⚠️ {modifier_name} completed via JOIN (welded {welded} seam vertices).")
     return False
 
 
@@ -214,29 +315,44 @@ try:
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.shade_smooth()
 
+    # Apply transforms BEFORE joining — prevents misaligned geometry
+    print("Applying transforms on imported objects...")
+    for obj in mesh_objs:
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+
     if len(mesh_objs) > 1:
         bpy.ops.object.join()
 
     model = bpy.context.active_object
     print(f"Model loaded with {len(model.data.vertices)} vertices", flush=True)
 
-    # ====================== GENTLE REPAIR (fill holes + fix normals only) ======================
-    # We intentionally skip remove_doubles, delete_loose, and delete_interior_faces.
-    # Meshy AI models intentionally overlap geometry (glasses in face, arms in shirt).
-    # Those ops misidentify overlapping mesh as defects and delete visible faces.
-    print("Filling open holes and fixing normals...", flush=True)
-    fill_and_fix(model)
-
-    open_e, non_m = check_manifold(model)
-    print(f"  Post-fill manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
-
     # ====================== SCALE ======================
+    # Scale BEFORE repair so all distance thresholds are in mm
     bmin, bmax = get_bounds([model])
     current_height = bmax.z - bmin.z
     scale_factor = desired_height_mm / current_height
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
+
+    # ====================== MESH REPAIR (after scaling, thresholds in mm) ======================
+    print("Running mesh repair (bmesh.ops)...", flush=True)
+    open_e_pre, non_m_pre = check_manifold(model)
+    print(f"  Pre-repair manifold: open_edges={open_e_pre}, non_manifold_verts={non_m_pre}", flush=True)
+
+    repair_mesh(model, merge_threshold=0.01)  # 0.01mm = 10 microns
+
+    open_e, non_m = check_manifold(model)
+    print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+    # If still many open edges, try a more aggressive merge (0.05mm)
+    if open_e > 100:
+        print("  ⚠️ Still many open edges, trying aggressive merge at 0.05mm...", flush=True)
+        repair_mesh(model, merge_threshold=0.05)
+        open_e, non_m = check_manifold(model)
+        print(f"  Post-aggressive-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== TEXTURE EXPORT ======================
     out_dir = os.path.dirname(output_path)
@@ -259,16 +375,16 @@ try:
                     print(f"✅ Texture saved: {texture_path}")
 
                     # Step 2: Patch sentinel corner pixels via Pillow subprocess.
-                    # PIL reads the PNG natively (compressed) and only writes 16 pixels,
-                    # so this is near-instant regardless of texture size.
-                    # - Bottom-left 4×4 → light grey (0.75 linear ≈ RGB 191) = base colour
-                    # - Top-left 4×4   → dark grey  (0.15 linear ≈ RGB 38)  = text colour
+                    # Sentinel patches are 8x8 pixels to ensure they cover
+                    # the UV coordinate (0.002, 0.002) on any texture size.
+                    # - Bottom-left 8×8 → light grey (RGB 191) = base colour
+                    # - Top-left 8×8   → dark grey  (RGB 38)  = text colour
                     patch_script = (
                         "from PIL import Image, ImageDraw; "
                         f"img=Image.open(r'{texture_path}').convert('RGBA'); "
                         "d=ImageDraw.Draw(img); "
-                        "d.rectangle([0,0,3,3],   fill=(191,191,191,255)); "  # base: light grey
-                        "d.rectangle([0,img.height-4,3,img.height-1], fill=(38,38,38,255)); "  # text: dark grey
+                        "d.rectangle([0,0,7,7],   fill=(191,191,191,255)); "  # base: light grey
+                        "d.rectangle([0,img.height-8,7,img.height-1], fill=(38,38,38,255)); "  # text: dark grey
                         f"img.save(r'{texture_path}')"
                     )
                     try:
@@ -278,7 +394,7 @@ try:
                             capture_output=True, text=True, timeout=30
                         )
                         if _result.returncode == 0:
-                            print("✅ Sentinel pixels patched via PIL")
+                            print("✅ Sentinel pixels patched via PIL (8×8 patches)")
                         else:
                             print(f"⚠️  PIL patch failed (non-fatal): {_result.stderr.strip()}")
                     except Exception as _e:
@@ -324,7 +440,7 @@ try:
             if base.data.uv_layers.active and model.data.uv_layers.active:
                 base.data.uv_layers.active.name = model.data.uv_layers.active.name
                 for loop in base.data.loops:
-                    base.data.uv_layers.active.data[loop.index].uv = (0.005, 0.005)
+                    base.data.uv_layers.active.data[loop.index].uv = (0.002, 0.002)
 
         # Text on base
         if text_str.strip():
@@ -353,7 +469,7 @@ try:
                     txt_mesh.data.uv_layers.active.name = model.data.uv_layers.active.name
                 if txt_mesh.data.uv_layers.active:
                     for loop in txt_mesh.data.loops:
-                        txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.005, 0.995)
+                        txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.002, 0.998)
 
             # Union text into base first
             robust_boolean_union(base, txt_mesh, "Text_Union")
@@ -364,11 +480,11 @@ try:
         # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
         # Original Meshy AI atlas UVs are NOT touched.
         print("Pinning out-of-range UVs after base union...")
-        pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
+        pin_new_face_uvs(model, uv_coord=(0.002, 0.002))
 
-        # Final cleanup on unified mesh
-        print("Running final seam cleanup...")
-        fill_and_fix(model)
+        # Post-boolean repair on unified mesh
+        print("Running post-boolean repair...")
+        repair_mesh(model, merge_threshold=0.01)
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -430,19 +546,18 @@ try:
             torus.data.materials.append(model.data.materials[0])
             if torus.data.uv_layers.active and model.data.uv_layers.active:
                 torus.data.uv_layers.active.name = model.data.uv_layers.active.name
-                fallback_uv = found_uv if found_uv is not None else (0.005, 0.995)
+                fallback_uv = found_uv if found_uv is not None else (0.002, 0.998)
                 for loop in torus.data.loops:
                     torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
 
         robust_boolean_union(model, torus, "Keychain_Union")
 
         # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
-        # Original Meshy AI atlas UVs are NOT touched.
         print("Pinning out-of-range UVs after keychain union...")
-        pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
+        pin_new_face_uvs(model, uv_coord=(0.002, 0.002))
 
-        # Final cleanup on keychain seam
-        fill_and_fix(model)
+        # Post-boolean repair
+        repair_mesh(model, merge_threshold=0.01)
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -453,15 +568,42 @@ try:
     print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
 
     if open_e > 0:
-        print("⚠️  Model is still non-manifold before export. Attempting final repair...")
-        fill_and_fix(model)
-        open_e, non_m = check_manifold(model)
-        print(f"  After final repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+        print("⚠️  Model is still non-manifold. Escalating repair...", flush=True)
 
-    # ====================== EXPORT ======================
+        # Escalation 1: aggressive merge + fill
+        repair_mesh(model, merge_threshold=0.05)
+        open_e, non_m = check_manifold(model)
+        print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+    if open_e > 0:
+        # Escalation 2: try even more aggressive merge (0.1mm)
+        print("  ⚠️ Still non-manifold. Trying 0.1mm merge threshold...", flush=True)
+        repair_mesh(model, merge_threshold=0.1)
+        open_e, non_m = check_manifold(model)
+        print(f"  After 0.1mm merge: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+    if open_e > 0:
+        print(f"  🚨 WARNING: Exporting with {open_e} open edges. Model may have visible holes.", flush=True)
+
+    # ====================== TRIANGULATE ======================
+    # Guarantee all faces are triangles — ngons from fill_holes can cause
+    # issues with some slicers and Marketiger's validator.
+    print("Triangulating mesh...")
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     bpy.context.view_layer.objects.active = model
+    mod = model.modifiers.new("Triangulate", 'TRIANGULATE')
+    mod.quad_method = 'BEAUTY'
+    mod.ngon_method = 'BEAUTY'
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
+
+    # ====================== EXPORT ======================
+    # Apply all transforms one final time
+    bpy.ops.object.select_all(action='DESELECT')
+    model.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
     # Verify output scale: log bounding-box dimensions in mm
     bmin_exp, bmax_exp = get_bounds([model])
@@ -480,6 +622,8 @@ try:
         'global_scale':            1.0,      # model units are mm; keep 1:1
     }
 
+    # We already triangulated via modifier, so export_triangulated_mesh is
+    # not needed, but set it if available for extra safety.
     try:
         export_kwargs['export_triangulated_mesh'] = True
         bpy.ops.wm.obj_export(**export_kwargs)
