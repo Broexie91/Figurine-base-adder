@@ -256,8 +256,10 @@ def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
     Uses numpy foreach_get/foreach_set to avoid slow Python loops over all loops.
 
-    Note: uv_coord (0.008, 0.008) maps to pixel 16 on a 2048px texture,
-    squarely inside the 32x32 grey sentinel patch painted by PIL.
+    Note: uv_coord (0.008, 0.008) = bottom-left of UV space.
+    Blender UV Y=0 is the bottom; PIL Y=0 is the top, so this maps to
+    PIL pixel (16, height-16) on a 2048px texture — inside the 32x32
+    grey patch painted at the bottom of the PIL image.
     """
     import numpy as np
     mesh = obj.data
@@ -482,15 +484,20 @@ try:
                     print(f"✅ Texture saved: {texture_path}")
 
                     # Step 2: Patch sentinel corner pixels via Pillow subprocess.
-                    # Sentinel patch is 32x32 pixels so UV (0.008, 0.008) reliably
-                    # lands in the centre of the patch on any texture size ≥256px.
-                    # On 2048px: UV 0.008 * 2048 = pixel 16 — well inside the 32px patch.
-                    # - Bottom-left 32×32 → medium grey (RGB 160) = base colour
+                    #
+                    # IMPORTANT — coordinate system:
+                    #   Blender UV: Y=0 is the BOTTOM of the texture.
+                    #   PIL image:  Y=0 is the TOP of the image.
+                    #   So UV (0.008, 0.008) → PIL pixel X=16, Y=image.height-16
+                    #   i.e. the patch must be at the BOTTOM of the PIL image.
+                    #
+                    # - Bottom 32×32 of PIL image (= UV bottom-left corner) →
+                    #   medium grey RGB(160,160,160) = base colour
                     patch_script = (
                         "from PIL import Image, ImageDraw; "
                         f"img=Image.open(r'{texture_path}').convert('RGBA'); "
                         "d=ImageDraw.Draw(img); "
-                        "d.rectangle([0,0,31,31], fill=(160,160,160,255)); "  # base: medium grey
+                        "d.rectangle([0,img.height-32,31,img.height-1], fill=(160,160,160,255)); "  # base: grey at UV (0,0) corner
                         f"img.save(r'{texture_path}')"
                     )
                     try:
