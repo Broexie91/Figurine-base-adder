@@ -63,82 +63,26 @@ def check_manifold(obj):
     return len(open_edges), len(non_manifold_verts)
 
 
-def clean_mesh(obj, threshold=0.001, fill_holes=True, fix_normals=True):
+def fill_and_fix(obj):
     """
-    Comprehensive mesh cleanup: remove doubles, fill holes, fix normals.
-    Safe to call multiple times.
+    Gentle mesh repair: ONLY fills open boundary holes and fixes normals.
+    Does NOT remove doubles, delete loose geometry, or delete interior faces.
+
+    Meshy AI models have intentional overlapping geometry (glasses embedded in
+    the face, arms inside the shirt body). Ops like remove_doubles,
+    delete_loose, and delete_interior_faces misidentify this as defects and
+    punch visible holes through the mesh. This function is safe for them.
     """
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.remove_doubles(threshold=threshold)
-    if fill_holes:
-        bpy.ops.mesh.fill_holes(sides=0)
-    if fix_normals:
-        bpy.ops.mesh.normals_make_consistent(inside=False)
-    bpy.ops.object.mode_set(mode='OBJECT')
-
-
-def apply_3d_print_toolbox(obj, threshold=0.001):
-    """
-    Natively replicates the 'Make Manifold' operator from the 3D Print Toolbox.
-    Guarantees the mesh is cleaned of interior faces, loose geometry, and holes
-    so it is perfectly watertight for boolean operations.
-    """
-    bpy.context.view_layer.objects.active = obj
     if obj.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
-        
     bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_mode(type='VERT')
-    bpy.ops.mesh.reveal(select=False)
-    
-    # 1. Delete loose geometry
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.delete_loose(use_verts=True, use_edges=True, use_faces=True)
-    
-    # 2. Delete interior faces
-    bpy.ops.mesh.select_all(action='DESELECT')
-    bpy.ops.mesh.select_interior_faces()
-    bpy.ops.mesh.delete(type='FACE')
-    
-    # 3. Remove doubles (merge by distance)
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.remove_doubles(threshold=threshold)
-    
-    # 4. Iteratively fill holes (sides=0 means fill all ngons)
-    def _elem_count():
-        bm = bmesh.from_edit_mesh(obj.data)
-        return len(bm.verts), len(bm.edges), len(bm.faces)
-        
-    bm_states = set()
-    bm_states.add(_elem_count())
-    
-    max_iters = 50
-    for _ in range(max_iters):
-        # Fill holes
-        bpy.ops.mesh.select_all(action='SELECT')
-        bpy.ops.mesh.fill_holes(sides=0)
-        
-        # Delete newly generated bad non-manifold verts from weird fills
-        bpy.ops.mesh.select_non_manifold(
-            extend=False, use_wire=True, use_boundary=False, 
-            use_multi_face=False, use_non_contiguous=False, use_verts=True
-        )
-        bpy.ops.mesh.delete(type='VERT')
-        
-        current_state = _elem_count()
-        if current_state in bm_states:
-            break
-        bm_states.add(current_state)
-        
-    # 5. Make normals consistently pointing outwards
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.normals_make_consistent(inside=False)
-    
+    bpy.ops.mesh.fill_holes(sides=0)          # close open boundary loops
+    bpy.ops.mesh.normals_make_consistent(inside=False)  # fix inverted faces
     bpy.ops.object.mode_set(mode='OBJECT')
-    print("✅ Native manifold repair applied", flush=True)
+    print("✅ fill_and_fix applied", flush=True)
 
 
 def pin_new_face_uvs(obj, uv_coord=(0.005, 0.005)):
@@ -273,13 +217,15 @@ try:
     model = bpy.context.active_object
     print(f"Model loaded with {len(model.data.vertices)} vertices", flush=True)
 
-    # ====================== PRE-CLEAN (before scaling) ======================
-    print("Running pre-clean on raw import...", flush=True)
-    clean_mesh(model, threshold=0.001, fill_holes=True, fix_normals=True)
-    print("  Pre-clean done.", flush=True)
+    # ====================== GENTLE REPAIR (fill holes + fix normals only) ======================
+    # We intentionally skip remove_doubles, delete_loose, and delete_interior_faces.
+    # Meshy AI models intentionally overlap geometry (glasses in face, arms in shirt).
+    # Those ops misidentify overlapping mesh as defects and delete visible faces.
+    print("Filling open holes and fixing normals...", flush=True)
+    fill_and_fix(model)
 
     open_e, non_m = check_manifold(model)
-    print(f"  Post pre-clean manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+    print(f"  Post-fill manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== SCALE ======================
     bmin, bmax = get_bounds([model])
@@ -288,21 +234,6 @@ try:
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
-
-    # ====================== 3D PRINT TOOLBOX CLEANUP ======================
-    print("Applying 3D Print Toolbox manifold repair...", flush=True)
-    apply_3d_print_toolbox(model)
-    print("  3D Print Toolbox done.", flush=True)
-
-    # Post-toolbox check
-    open_e, non_m = check_manifold(model)
-    print(f"  Post-toolbox manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
-
-    if open_e > 0:
-        print("  Still non-manifold — running secondary clean pass...", flush=True)
-        clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
-        open_e, non_m = check_manifold(model)
-        print(f"  Post-secondary-clean: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== TEXTURE EXPORT ======================
     out_dir = os.path.dirname(output_path)
