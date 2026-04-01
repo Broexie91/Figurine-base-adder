@@ -365,7 +365,7 @@ try:
 
         # Final cleanup on unified mesh
         print("Running final seam cleanup...")
-        clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
+        fill_and_fix(model)
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -439,7 +439,7 @@ try:
         pin_new_face_uvs(model, uv_coord=(0.005, 0.005))
 
         # Final cleanup on keychain seam
-        clean_mesh(model, threshold=0.005, fill_holes=True, fix_normals=True)
+        fill_and_fix(model)
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -451,8 +451,7 @@ try:
 
     if open_e > 0:
         print("⚠️  Model is still non-manifold before export. Attempting final repair...")
-        apply_3d_print_toolbox(model)
-        clean_mesh(model, threshold=0.01, fill_holes=True, fix_normals=True)
+        fill_and_fix(model)
         open_e, non_m = check_manifold(model)
         print(f"  After final repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
