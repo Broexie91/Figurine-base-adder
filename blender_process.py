@@ -653,7 +653,7 @@ try:
         if open_e > 0:
             print("⚠️  Model is still non-manifold. Escalating repair...", flush=True)
 
-            # Escalation 1: aggressive merge + fill
+            # Escalation 1: aggressive merge + fill (0.05mm)
             repair_mesh(model, merge_threshold=0.05)
             open_e, non_m = check_manifold(model)
             print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -666,17 +666,19 @@ try:
             open_e, non_m = check_manifold(model)
             print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-        if open_e > 0:
-            # Escalation 3: last resort aggressive merge
-            print("  ⚠️ Still non-manifold. Trying 0.1mm merge threshold...", flush=True)
-            repair_mesh(model, merge_threshold=0.1)
-            open_e, non_m = check_manifold(model)
-            print(f"  After 0.1mm merge: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+        # Note: no 0.1mm merge escalation — logs showed it increases open edges
+        # (57→61) by welding vertices in overlapping AI mesh shells that shouldn't merge.
 
-        if open_e > 0:
+        # Only warn if open_edges is very high (>200). Meshy AI models typically
+        # have 50-90 structural open edges from intentional overlapping geometry
+        # (glasses in face, arms in shirt). Marketiger heals these automatically.
+        if open_e > 200:
             print(f"  🚨 WARNING: Exporting with {open_e} open edges. Model may have visible holes.", flush=True)
+        elif open_e > 0:
+            print(f"  ℹ️  {open_e} open edges remain (structural AI mesh overlap — Marketiger will heal).", flush=True)
     else:
         print("⚡ Skipping manifold gate (skip_repair=true)", flush=True)
+
 
     # ====================== TRIANGULATE ======================
     # Guarantee all faces are triangles — ngons from fill_holes can cause
