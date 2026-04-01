@@ -15,7 +15,7 @@ app = FastAPI(title="GLB Figurine Base Adder")
 def test_blender():
     try:
         cmd = ["blender", "-b", "--python", "/app/blender_process.py", "--",
-               "test_input.glb", "test_output.obj", "10", "test", "true", "false"]
+               "test_input.glb", "test_output.obj", "10", "true", "false"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return {
             "returncode": result.returncode,
@@ -28,9 +28,8 @@ def test_blender():
 
 class BaseRequest(BaseModel):
     model_url: str
-    size_cm: int
+    size_cm: float
     order_nr: str  # Toegevoegd voor de bestandsnaam
-    text: str = ""
     add_base: bool = True
     add_keychain: bool = False
 
@@ -41,8 +40,8 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False):
     Downloads the GLB, runs Blender, and returns a ZIP response.
     """
     # Validatie van de input
-    if request.size_cm not in [6, 8, 10]:
-        raise HTTPException(status_code=400, detail="size_cm moet 6, 8 of 10 zijn")
+    if request.size_cm <= 0:
+        raise HTTPException(status_code=400, detail="size_cm moet een positief getal zijn")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -64,14 +63,11 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False):
 
         print(f"Input file downloaded for order {request.order_nr}, size: {len(content)} bytes")
         
-        # Tekst afhandeling voor Blender
-        text_arg = request.text if request.text.strip() else "--NO-TEXT--"
-
         # 2. Blender aanroepen met XVFB (headless display)
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
-            str(input_glb), str(output_obj), str(request.size_cm), text_arg,
+            str(input_glb), str(output_obj), str(request.size_cm),
             str(request.add_base), str(request.add_keychain), str(skip_repair)
         ]
 

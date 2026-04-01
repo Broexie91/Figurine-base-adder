@@ -392,12 +392,9 @@ try:
     input_path     = argv[0]
     output_path    = argv[1]
     size_cm        = float(argv[2])
-    text_str       = argv[3] if len(argv) > 3 else ""
-    if text_str == "--NO-TEXT--":
-        text_str = ""
-    add_base       = argv[4].lower() == 'true' if len(argv) > 4 else True
-    add_keychain   = argv[5].lower() == 'true' if len(argv) > 5 else False
-    skip_repair    = argv[6].lower() == 'true' if len(argv) > 6 else False
+    add_base       = argv[3].lower() == 'true' if len(argv) > 3 else True
+    add_keychain   = argv[4].lower() == 'true' if len(argv) > 4 else False
+    skip_repair    = argv[5].lower() == 'true' if len(argv) > 5 else False
 
     desired_height_mm = size_cm * 10
 
@@ -551,38 +548,6 @@ try:
                 base.data.uv_layers.active.name = model.data.uv_layers.active.name
                 for loop in base.data.loops:
                     base.data.uv_layers.active.data[loop.index].uv = (0.002, 0.002)
-
-        # Text on base
-        if text_str.strip():
-            text_loc = (center_x, center_y - radius * 0.65, bmin.z + 0.4)
-            bpy.ops.object.text_add(location=text_loc)
-            txt = bpy.context.active_object
-            txt.data.body     = text_str.upper()[:40]
-            txt.data.size     = radius * 0.25
-            txt.data.extrude  = 0.5
-            txt.data.align_x  = 'CENTER'
-            txt.data.align_y  = 'CENTER'
-            txt.rotation_euler = (0, 0, 0)
-            bpy.context.view_layer.update()
-
-            if txt.dimensions.x > radius * 1.4:
-                txt.data.size *= radius * 1.4 / txt.dimensions.x
-
-            bpy.ops.object.convert(target='MESH')
-            txt_mesh = bpy.context.active_object
-
-            if len(model.data.materials) > 0:
-                txt_mesh.data.materials.append(model.data.materials[0])
-                if not txt_mesh.data.uv_layers and model.data.uv_layers.active:
-                    txt_mesh.data.uv_layers.new(name=model.data.uv_layers.active.name)
-                elif txt_mesh.data.uv_layers.active and model.data.uv_layers.active:
-                    txt_mesh.data.uv_layers.active.name = model.data.uv_layers.active.name
-                if txt_mesh.data.uv_layers.active:
-                    for loop in txt_mesh.data.loops:
-                        txt_mesh.data.uv_layers.active.data[loop.index].uv = (0.002, 0.998)
-
-            # Union text into base first
-            robust_boolean_union(base, txt_mesh, "Text_Union")
 
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
