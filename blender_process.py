@@ -425,6 +425,146 @@ def deep_repair(obj, max_iterations=3):
 
 
 
+def fix_normals_per_shell(obj):
+    """
+    Fix normals per disconnected shell using signed-volume analysis.
+
+    For each connected component (shell) in the mesh:
+      1. Ensure internal consistency via recalc_face_normals.
+      2. Compute signed volume — positive = outward, negative = inward.
+      3. For near-zero volume (flat/thin shells), use a ray-cast heuristic.
+      4. Flip normals of shells that point inward.
+
+    This is strictly more reliable than recalc_face_normals alone, which can
+    make normals consistent but consistently WRONG for individual shells in
+    non-manifold AI-generated meshes.
+    """
+    from mathutils.bvhtree import BVHTree
+
+    print("Running per-shell normals fix...", flush=True)
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+
+    # Step 0: Make normals consistent within each shell first
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+
+    # Step 1: Find connected components (shells) via face flood-fill
+    visited = set()
+    shells = []
+
+    for face in bm.faces:
+        if face.index in visited:
+            continue
+        shell = []
+        queue = [face]
+        while queue:
+            f = queue.pop()
+            if f.index in visited:
+                continue
+            visited.add(f.index)
+            shell.append(f)
+            for edge in f.edges:
+                for linked_face in edge.link_faces:
+                    if linked_face.index not in visited:
+                        queue.append(linked_face)
+        shells.append(shell)
+
+    print(f"  Found {len(shells)} shell(s)", flush=True)
+
+    # Step 2: Build BVH tree for ray-cast fallback
+    bm.faces.ensure_lookup_table()
+    bvh = BVHTree.FromBMesh(bm)
+
+    total_flipped = 0
+    volume_threshold = 0.01  # mm³ — below this, volume test is inconclusive
+
+    for i, shell in enumerate(shells):
+        # --- Signed volume: V = Σ (v0 · (v1 × v2)) / 6 ---
+        signed_vol = 0.0
+        for face in shell:
+            verts = face.verts
+            if len(verts) < 3:
+                continue
+            v0 = verts[0].co
+            for j in range(1, len(verts) - 1):
+                v1 = verts[j].co
+                v2 = verts[j + 1].co
+                signed_vol += v0.dot(v1.cross(v2)) / 6.0
+
+        needs_flip = False
+        method = ""
+
+        if abs(signed_vol) > volume_threshold:
+            # Volume test is conclusive
+            if signed_vol < 0:
+                needs_flip = True
+                method = "volume"
+            else:
+                method = "volume"
+        else:
+            # Near-zero volume — use ray-cast heuristic.
+            # Cast rays from face centroids along their normals.
+            # If the ray hits another surface nearby, the normal likely
+            # points inward (into the solid body), so we should flip.
+            inward_votes = 0
+            outward_votes = 0
+
+            sample_faces = shell[:50] if len(shell) > 50 else shell
+
+            for face in sample_faces:
+                centroid = face.calc_center_median()
+                normal = face.normal
+                if normal.length < 1e-6:
+                    continue
+
+                # Offset slightly along normal to avoid self-hit
+                ray_origin = centroid + normal * 0.02
+
+                hit_loc, hit_normal, hit_index, hit_dist = bvh.ray_cast(
+                    ray_origin, normal
+                )
+
+                if hit_loc is not None and hit_dist < 50.0:
+                    inward_votes += 1
+                else:
+                    outward_votes += 1
+
+            if inward_votes > outward_votes:
+                needs_flip = True
+                method = f"raycast({inward_votes}in/{outward_votes}out)"
+            else:
+                method = f"raycast({inward_votes}in/{outward_votes}out)"
+
+        if needs_flip:
+            for face in shell:
+                face.normal_flip()
+            total_flipped += len(shell)
+            status = f"🔄 FLIPPED ({method})"
+        else:
+            status = f"✅ OK ({method})"
+
+        # Log: always log flipped shells; log all if ≤20 shells
+        if len(shells) <= 20 or needs_flip:
+            print(f"    Shell {i}: {len(shell)} faces, "
+                  f"vol={signed_vol:.2f}mm³ → {status}", flush=True)
+
+    if total_flipped > 0:
+        print(f"  🔄 Flipped normals on {total_flipped} faces across shell(s)",
+              flush=True)
+    else:
+        print(f"  ✅ All shell normals already point outward", flush=True)
+
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+
+    return total_flipped
+
+
 def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
@@ -866,6 +1006,15 @@ try:
     mod.ngon_method = 'BEAUTY'
     bpy.ops.object.modifier_apply(modifier=mod.name)
     print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
+
+    # ====================== FINAL NORMALS FIX ======================
+    # Per-shell signed-volume normals correction.
+    # This MUST run after triangulation (so all faces are tris for accurate
+    # volume computation) and before export (so the OBJ has correct normals).
+    print("Running final per-shell normals fix...")
+    flipped = fix_normals_per_shell(model)
+    if flipped > 0:
+        print(f"  ✅ Fixed {flipped} inward-facing faces before export", flush=True)
 
     # ====================== EXPORT ======================
     # Apply all transforms one final time
