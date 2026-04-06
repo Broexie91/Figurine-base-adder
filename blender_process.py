@@ -964,21 +964,23 @@ try:
         open_e, non_m = check_manifold(model)
         print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
 
-        if open_e > 0:
-            print("⚠️  Model is still non-manifold. Escalating repair...", flush=True)
+        if open_e > 200:
+            print(f"⚠️  {open_e} open edges exceeds threshold (200). Escalating repair...", flush=True)
 
             # Escalation 1: aggressive merge + fill (0.05mm)
             repair_mesh(model, merge_threshold=0.05)
             open_e, non_m = check_manifold(model)
             print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-        if open_e > 0:
-            # Escalation 2: deep repair — handles wire edges, interior faces,
-            # and uses bpy.ops select_non_manifold + fill iteratively
-            print("  ⚠️ Still non-manifold. Running deep_repair...", flush=True)
-            deep_repair(model, max_iterations=5)
-            open_e, non_m = check_manifold(model)
-            print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+            if open_e > 200:
+                # Escalation 2: deep repair — handles wire edges, interior faces,
+                # and uses bpy.ops select_non_manifold + fill iteratively
+                print("  ⚠️ Still non-manifold. Running deep_repair...", flush=True)
+                deep_repair(model, max_iterations=5)
+                open_e, non_m = check_manifold(model)
+                print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+        elif open_e > 0:
+            print(f"  ℹ️  {open_e} open edges ≤ 200 — skipping aggressive repair (Marketiger auto-heals).", flush=True)
 
         # Note: no 0.1mm merge escalation — logs showed it increases open edges
         # (57→61) by welding vertices in overlapping AI mesh shells that shouldn't merge.
