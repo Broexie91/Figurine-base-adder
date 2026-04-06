@@ -857,8 +857,8 @@ try:
             foot_verts,
             bmin_z        = foot_bmin_z,
             thickness_mm  = base_thickness_mm,
-            margin_mm     = 3.0,
-            min_radius_mm = 15.0,
+            margin_mm     = 1.5,
+            min_radius_mm = 8.0,
             com_xy        = com_xy,
         )
 
