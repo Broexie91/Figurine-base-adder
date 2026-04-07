@@ -6,7 +6,7 @@ import traceback
 import bmesh
 from mathutils import Vector
 
-# Force unbuffered stdout so every print() appears in Railway logs immediately,
+# Force unbuffered stdout so every print() appears in Railway logs immediately.
 # even if the process is killed mid-run by a timeout.
 try:
     sys.stdout.reconfigure(line_buffering=True)
