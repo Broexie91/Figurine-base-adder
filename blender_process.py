@@ -565,6 +565,109 @@ def fix_normals_per_shell(obj):
     return total_flipped
 
 
+def remove_ghost_shells(obj, min_faces=50):
+    """
+    Remove tiny disconnected shells ("ghost shells") that cause
+    Marketiger upload failures.
+
+    Meshy AI models often contain 1-8 triangle fragments floating inside
+    the mesh. Marketiger's processing usually auto-removes these, but
+    sometimes fails.
+
+    Strategy:
+      - Always keep the largest shell (main figurine body).
+      - Remove any other shell with fewer than min_faces faces.
+      - Log every decision for transparency.
+
+    Args:
+        obj: Blender mesh object.
+        min_faces: Shells with fewer faces than this are removed.
+                   Default 50 — conservative enough to preserve legitimate
+                   accessories (glasses, earrings ≥ 100 faces) while catching
+                   ghost shells (typically 1-8 faces).
+
+    Returns:
+        Number of shells removed.
+    """
+    print(f"Removing ghost shells (threshold: {min_faces} faces)...", flush=True)
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+
+    # --- Find connected components (shells) via face flood-fill ---
+    visited = set()
+    shells = []
+
+    for face in bm.faces:
+        if face.index in visited:
+            continue
+        shell = []
+        queue = [face]
+        while queue:
+            f = queue.pop()
+            if f.index in visited:
+                continue
+            visited.add(f.index)
+            shell.append(f)
+            for edge in f.edges:
+                for linked_face in edge.link_faces:
+                    if linked_face.index not in visited:
+                        queue.append(linked_face)
+        shells.append(shell)
+
+    print(f"  Found {len(shells)} shell(s)", flush=True)
+
+    if len(shells) <= 1:
+        bm.free()
+        print("  ✅ Single shell — nothing to remove.", flush=True)
+        return 0
+
+    # --- Sort by face count (largest first) ---
+    shells.sort(key=lambda s: len(s), reverse=True)
+
+    # --- Decide which shells to keep/remove ---
+    faces_to_delete = []
+    removed_count = 0
+    removed_faces_total = 0
+    kept_count = 0
+    kept_faces_total = 0
+
+    for i, shell in enumerate(shells):
+        n_faces = len(shell)
+        if i == 0:
+            # Always keep the largest shell
+            print(f"  Shell {i}: {n_faces} faces → ✅ KEEP (main)", flush=True)
+            kept_count += 1
+            kept_faces_total += n_faces
+        elif n_faces < min_faces:
+            # Ghost shell — mark for deletion
+            print(f"  Shell {i}: {n_faces} faces → 🗑️ REMOVED (ghost)", flush=True)
+            faces_to_delete.extend(shell)
+            removed_count += 1
+            removed_faces_total += n_faces
+        else:
+            # Large enough to be a legitimate sub-object
+            print(f"  Shell {i}: {n_faces} faces → ✅ KEEP (above threshold)", flush=True)
+            kept_count += 1
+            kept_faces_total += n_faces
+
+    # --- Delete ghost shells ---
+    if faces_to_delete:
+        bmesh.ops.delete(bm, geom=faces_to_delete, context='FACES')
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        print(f"  🗑️ Removed {removed_count} ghost shell(s) ({removed_faces_total} faces total), "
+              f"kept {kept_count} shell(s) ({kept_faces_total} faces)", flush=True)
+    else:
+        print(f"  ✅ No ghost shells found (all {len(shells)} shells ≥ {min_faces} faces).", flush=True)
+
+    bm.free()
+    return removed_count
+
+
 def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
@@ -994,6 +1097,12 @@ try:
             print(f"  ℹ️  {open_e} open edges remain (structural AI mesh overlap — Marketiger will heal).", flush=True)
     else:
         print("⚡ Skipping manifold gate (skip_repair=true)", flush=True)
+
+    # ====================== GHOST SHELL REMOVAL ======================
+    # Always runs (even with skip_repair) — ghost shells are import artifacts
+    # from Meshy AI, not repair artifacts. Removing tiny disconnected fragments
+    # can't damage the main mesh.
+    remove_ghost_shells(model, min_faces=50)
 
 
     # ====================== TRIANGULATE ======================
