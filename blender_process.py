@@ -787,92 +787,85 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
 
 
 
-def selective_solidify(obj, thickness_mm=0.8, min_thickness_mm=1.0):
+def selective_solidify(obj, thickness_mm=0.8):
     """
-    Detect thin/single-sided faces via ray casting and solidify only those.
+    Detect single-sided faces via boundary-edge analysis and solidify only those.
 
-    For each face, casts a ray along -normal from the face centre.
-    If the ray misses (single-sided surface, e.g. dress/veil) or hits
-    at a distance < min_thickness_mm (very thin wall), the face's
-    vertices are marked for solidification.
+    Single-sided geometry (dresses, veils, capes) has edges that belong to
+    only ONE face (boundary edges). Closed geometry (body, legs, fingers)
+    has every edge shared by exactly 2 faces — no boundary edges at all.
 
-    Uses a vertex group to drive the Solidify modifier so thick parts
-    (body, legs, fingers) are completely untouched.
+    This is a topological check — fast, deterministic, and unaffected by
+    non-manifold mesh artefacts that confuse ray-cast approaches.
+
+    Strategy:
+      1. Use bmesh to find all boundary edges (edge.is_boundary).
+      2. Mark faces that touch at least one boundary edge.
+      3. Collect vertices of those faces into a vertex group.
+      4. Apply Solidify modifier driven by that vertex group.
+      5. Weld to clean up zero-thickness seams.
 
     Args:
         obj: Blender mesh object (must be active and selected).
         thickness_mm: How much thickness to add to thin faces.
-        min_thickness_mm: Faces with wall thickness below this are
-                          considered "thin" and will be solidified.
 
     Returns:
         Number of thin faces detected.
     """
-    print(f"Detecting thin faces (threshold={min_thickness_mm}mm)...", flush=True)
+    print(f"Detecting single-sided faces via boundary edges...", flush=True)
 
-    mesh = obj.data
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    obj_eval = obj.evaluated_get(depsgraph)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
 
-    # Ensure mesh data is up to date
-    mesh.calc_loop_triangles()
+    # Step 1: Find all boundary edges (connected to exactly 1 face)
+    boundary_edges = set()
+    for edge in bm.edges:
+        if edge.is_boundary:
+            boundary_edges.add(edge.index)
 
-    # Track which vertices are thin
-    thin_verts = set()
-    thin_face_count = 0
-    total_faces = len(mesh.polygons)
-
-    # Small offset to avoid self-intersection when casting
-    EPSILON = 0.01  # 0.01mm
-
-    for poly in mesh.polygons:
-        # Face centre and inverted normal in local space
-        origin = poly.center
-        direction = -poly.normal
-
-        if direction.length < 1e-6:
-            continue
-
-        # Offset origin slightly to avoid self-hit
-        ray_origin = origin + direction * EPSILON
-
-        # Cast ray in object local space
-        hit, location, normal, face_idx = obj_eval.ray_cast(ray_origin, direction)
-
-        is_thin = False
-        if not hit:
-            # No opposing surface — single-sided geometry (dress, veil)
-            is_thin = True
-        else:
-            dist = (location - origin).length
-            if dist < min_thickness_mm:
-                # Very thin wall
-                is_thin = True
-
-        if is_thin:
-            thin_face_count += 1
-            for vi in poly.vertices:
-                thin_verts.add(vi)
-
-    thin_pct = (thin_face_count / total_faces * 100) if total_faces > 0 else 0
-    print(f"  Found {thin_face_count}/{total_faces} thin faces ({thin_pct:.1f}%), "
-          f"{len(thin_verts)} vertices", flush=True)
-
-    if thin_face_count == 0:
-        print("  ✅ No thin geometry detected — skipping solidify.", flush=True)
+    if not boundary_edges:
+        bm.free()
+        print("  ✅ No boundary edges — mesh is fully closed. Skipping solidify.", flush=True)
         return 0
 
-    # Skip if nearly all faces are thin — same result as global solidify
-    # which caused Marketiger issues
-    if thin_pct > 80:
-        print(f"  ⚠️  {thin_pct:.0f}% of faces are thin — skipping solidify "
+    # Step 2: Find faces touching at least one boundary edge
+    thin_face_indices = set()
+    thin_vert_indices = set()
+
+    for face in bm.faces:
+        has_boundary = False
+        for edge in face.edges:
+            if edge.index in boundary_edges:
+                has_boundary = True
+                break
+        if has_boundary:
+            thin_face_indices.add(face.index)
+            for vert in face.verts:
+                thin_vert_indices.add(vert.index)
+
+    total_faces = len(bm.faces)
+    bm.free()
+
+    thin_pct = (len(thin_face_indices) / total_faces * 100) if total_faces > 0 else 0
+    print(f"  Found {len(thin_face_indices)}/{total_faces} single-sided faces ({thin_pct:.1f}%), "
+          f"{len(thin_vert_indices)} vertices, {len(boundary_edges)} boundary edges", flush=True)
+
+    if len(thin_face_indices) == 0:
+        print("  ✅ No single-sided faces detected — skipping solidify.", flush=True)
+        return 0
+
+    # Skip if nearly all faces are single-sided — same result as global solidify
+    if thin_pct > 60:
+        print(f"  ⚠️  {thin_pct:.0f}% of faces are single-sided — skipping solidify "
               f"(would be equivalent to global solidify).", flush=True)
-        return thin_face_count
+        return len(thin_face_indices)
 
     # --- Create vertex group with weights ---
     vg = obj.vertex_groups.new(name="ThinWalls")
-    vg.add(list(thin_verts), 1.0, 'REPLACE')
-    print(f"  Created vertex group 'ThinWalls' with {len(thin_verts)} vertices", flush=True)
+    vg.add(list(thin_vert_indices), 1.0, 'REPLACE')
+    print(f"  Created vertex group 'ThinWalls' with {len(thin_vert_indices)} vertices", flush=True)
 
     # --- Apply Solidify modifier driven by vertex group ---
     bpy.context.view_layer.objects.active = obj
@@ -885,10 +878,10 @@ def selective_solidify(obj, thickness_mm=0.8, min_thickness_mm=1.0):
     solidify_mod.use_quality_normals = True
     solidify_mod.vertex_group = "ThinWalls"
 
-    verts_before = len(mesh.vertices)
+    verts_before = len(obj.data.vertices)
     bpy.ops.object.modifier_apply(modifier=solidify_mod.name)
 
-    # --- Weld modifier to merge zero-thickness artifacts ---
+    # --- Weld modifier to merge zero-thickness seam vertices ---
     weld_mod = obj.modifiers.new("Weld_Cleanup", 'WELD')
     weld_mod.merge_threshold = 0.01  # 0.01mm
     bpy.ops.object.modifier_apply(modifier=weld_mod.name)
@@ -897,7 +890,7 @@ def selective_solidify(obj, thickness_mm=0.8, min_thickness_mm=1.0):
     print(f"  ✅ Selective solidify applied: {verts_before} → {verts_after} vertices "
           f"(+{verts_after - verts_before})", flush=True)
 
-    return thin_face_count
+    return len(thin_face_indices)
 
 
 # ====================== MAIN ======================
@@ -1060,7 +1053,7 @@ try:
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     bpy.context.view_layer.objects.active = model
-    selective_solidify(model, thickness_mm=0.8, min_thickness_mm=1.0)
+    selective_solidify(model, thickness_mm=0.8)
 
 
     # ====================== BASE ======================
