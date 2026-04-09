@@ -940,6 +940,26 @@ try:
     if not found_texture:
         print("⚠️  No embedded texture found.")
 
+    # ====================== SOLIDIFY (thin geometry fix) ======================
+    # AI-generated meshes often have single-sided surfaces for flowing fabric
+    # (dresses, veils, capes). 3D print slicers discard these because they have
+    # zero wall thickness. A Solidify modifier adds inward thickness so thin
+    # parts become printable while thick parts (body, legs, fingers) stay
+    # visually identical (outer surface doesn't move with offset=-1).
+    SOLIDIFY_THICKNESS_MM = 0.8
+    print(f"Applying Solidify ({SOLIDIFY_THICKNESS_MM}mm inward) for thin geometry...", flush=True)
+    bpy.ops.object.select_all(action='DESELECT')
+    model.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    solidify_mod = model.modifiers.new("Solidify_Thin", 'SOLIDIFY')
+    solidify_mod.thickness = SOLIDIFY_THICKNESS_MM
+    solidify_mod.offset = -1        # extrude inward only — outer surface stays put
+    solidify_mod.use_even_offset = True   # uniform thickness on angled faces
+    solidify_mod.use_quality_normals = True
+    verts_before = len(model.data.vertices)
+    bpy.ops.object.modifier_apply(modifier=solidify_mod.name)
+    print(f"  ✅ Solidified: {verts_before} → {len(model.data.vertices)} vertices", flush=True)
+
     # ====================== BASE ======================
     bmin, bmax = get_bounds([model])
 
