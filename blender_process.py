@@ -860,6 +860,25 @@ try:
     bpy.ops.object.transform_apply(scale=True)
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
+    # ====================== DECIMATION GUARD ======================
+    # AI-generated GLBs can have 500K-1M+ vertices. Every downstream
+    # operation (repair, boolean, normals, triangulate) scales with vert
+    # count, causing timeouts on large models. Cap at ~400K vertices.
+    MAX_VERTS = 500_000
+    TARGET_VERTS = 400_000
+    vert_count = len(model.data.vertices)
+    if vert_count > MAX_VERTS:
+        ratio = TARGET_VERTS / vert_count
+        print(f"⚠️  Model has {vert_count} vertices (>{MAX_VERTS}). "
+              f"Decimating to ~{TARGET_VERTS} (ratio={ratio:.3f})...", flush=True)
+        mod = model.modifiers.new("Decimate_Guard", 'DECIMATE')
+        mod.decimate_type = 'COLLAPSE'
+        mod.ratio = ratio
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        print(f"  ✅ Decimated: {vert_count} → {len(model.data.vertices)} vertices", flush=True)
+    else:
+        print(f"Vertex count OK: {vert_count} (≤{MAX_VERTS})", flush=True)
+
     # ====================== MESH REPAIR (after scaling, thresholds in mm) ======================
     if not skip_repair:
         print("Running mesh repair (bmesh.ops)...", flush=True)

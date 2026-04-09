@@ -72,7 +72,7 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False):
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
             # Always flush Blender output to Railway logs so we can debug any run
             print("--- Blender stdout ---")
@@ -120,7 +120,7 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False):
             print(partial_out or "(geen output)")
             print("--- Blender TIMEOUT partial stderr ---")
             print(partial_err or "(geen output)")
-            raise HTTPException(status_code=500, detail="Verwerking timeout (120s overschreden)")
+            raise HTTPException(status_code=500, detail="Verwerking timeout (300s overschreden)")
         except Exception as e:
             print(f"Unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Onverwachte fout: {str(e)}")
