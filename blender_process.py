@@ -787,78 +787,100 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
 
 
 
-def selective_solidify(obj, thickness_mm=0.8):
+def selective_solidify(obj, thickness_mm=0.8, min_wall_mm=1.0):
     """
-    Detect single-sided faces via boundary-edge analysis and solidify only those.
+    Detect thin geometry via two complementary methods and solidify only those faces.
 
-    Single-sided geometry (dresses, veils, capes) has edges that belong to
-    only ONE face (boundary edges). Closed geometry (body, legs, fingers)
-    has every edge shared by exactly 2 faces — no boundary edges at all.
+    Detection methods (combined):
+      1. Boundary edges — faces with edges belonging to only 1 face.
+         Catches truly open/single-sided surfaces.
+      2. Thin-wall ray-cast — for each face, cast a ray along -normal.
+         If it HITS the opposing surface at distance < min_wall_mm,
+         the face is a thin closed shell (e.g. remeshed dress).
+         Rays that MISS are explicitly ignored — those are convex
+         outer surfaces, not thin walls.
 
-    This is a topological check — fast, deterministic, and unaffected by
-    non-manifold mesh artefacts that confuse ray-cast approaches.
-
-    Strategy:
-      1. Use bmesh to find all boundary edges (edge.is_boundary).
-      2. Mark faces that touch at least one boundary edge.
-      3. Collect vertices of those faces into a vertex group.
-      4. Apply Solidify modifier driven by that vertex group.
-      5. Weld to clean up zero-thickness seams.
+    Uses a vertex group to drive the Solidify modifier so thick parts
+    (body, legs, fingers) are completely untouched.
 
     Args:
         obj: Blender mesh object (must be active and selected).
         thickness_mm: How much thickness to add to thin faces.
+        min_wall_mm: Faces with wall thickness below this are solidified.
 
     Returns:
         Number of thin faces detected.
     """
-    print(f"Detecting single-sided faces via boundary edges...", flush=True)
+    print(f"Detecting thin geometry (boundary edges + thin-wall ray-cast < {min_wall_mm}mm)...",
+          flush=True)
 
+    # ---- Phase 1: Boundary-edge detection ----
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bm.edges.ensure_lookup_table()
     bm.faces.ensure_lookup_table()
 
-    # Step 1: Find all boundary edges (connected to exactly 1 face)
-    boundary_edges = set()
-    for edge in bm.edges:
-        if edge.is_boundary:
-            boundary_edges.add(edge.index)
-
-    if not boundary_edges:
-        bm.free()
-        print("  ✅ No boundary edges — mesh is fully closed. Skipping solidify.", flush=True)
-        return 0
-
-    # Step 2: Find faces touching at least one boundary edge
     thin_face_indices = set()
     thin_vert_indices = set()
 
     for face in bm.faces:
-        has_boundary = False
         for edge in face.edges:
-            if edge.index in boundary_edges:
-                has_boundary = True
-                break
-        if has_boundary:
-            thin_face_indices.add(face.index)
-            for vert in face.verts:
-                thin_vert_indices.add(vert.index)
+            if edge.is_boundary:
+                thin_face_indices.add(face.index)
+                for vert in face.verts:
+                    thin_vert_indices.add(vert.index)
+                break  # one boundary edge is enough to flag the face
 
     total_faces = len(bm.faces)
     bm.free()
 
+    print(f"  Boundary edges: {len(thin_face_indices)} faces flagged", flush=True)
+
+    # ---- Phase 2: Thin-wall ray-cast detection ----
+    mesh = obj.data
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    obj_eval = obj.evaluated_get(depsgraph)
+
+    EPSILON = 0.02  # offset to avoid self-hit (0.02mm)
+    raycast_hits = 0
+
+    for poly in mesh.polygons:
+        if poly.index in thin_face_indices:
+            continue  # already flagged by boundary detection
+
+        direction = -poly.normal
+        if direction.length < 1e-6:
+            continue
+
+        origin = poly.center
+        ray_origin = origin + direction * EPSILON
+
+        hit, location, normal, face_idx = obj_eval.ray_cast(ray_origin, direction)
+
+        # ONLY flag if the ray HIT at a short distance (thin closed shell).
+        # Rays that miss are NOT thin — they are convex outer surfaces.
+        if hit:
+            dist = (location - origin).length
+            if dist < min_wall_mm:
+                thin_face_indices.add(poly.index)
+                for vi in poly.vertices:
+                    thin_vert_indices.add(vi)
+                raycast_hits += 1
+
+    print(f"  Thin-wall ray-cast: {raycast_hits} additional faces flagged (hit < {min_wall_mm}mm)",
+          flush=True)
+
     thin_pct = (len(thin_face_indices) / total_faces * 100) if total_faces > 0 else 0
-    print(f"  Found {len(thin_face_indices)}/{total_faces} single-sided faces ({thin_pct:.1f}%), "
-          f"{len(thin_vert_indices)} vertices, {len(boundary_edges)} boundary edges", flush=True)
+    print(f"  Total: {len(thin_face_indices)}/{total_faces} thin faces ({thin_pct:.1f}%), "
+          f"{len(thin_vert_indices)} vertices", flush=True)
 
     if len(thin_face_indices) == 0:
-        print("  ✅ No single-sided faces detected — skipping solidify.", flush=True)
+        print("  No thin geometry detected, skipping solidify.", flush=True)
         return 0
 
-    # Skip if nearly all faces are single-sided — same result as global solidify
+    # Skip if too many faces are thin — would be equivalent to global solidify
     if thin_pct > 60:
-        print(f"  ⚠️  {thin_pct:.0f}% of faces are single-sided — skipping solidify "
+        print(f"  {thin_pct:.0f}% of faces are thin, skipping solidify "
               f"(would be equivalent to global solidify).", flush=True)
         return len(thin_face_indices)
 
@@ -873,7 +895,7 @@ def selective_solidify(obj, thickness_mm=0.8):
 
     solidify_mod = obj.modifiers.new("Solidify_Thin", 'SOLIDIFY')
     solidify_mod.thickness = thickness_mm
-    solidify_mod.offset = -1           # extrude inward — outer surface stays put
+    solidify_mod.offset = -1           # extrude inward, outer surface stays put
     solidify_mod.use_even_offset = True
     solidify_mod.use_quality_normals = True
     solidify_mod.vertex_group = "ThinWalls"
@@ -887,7 +909,7 @@ def selective_solidify(obj, thickness_mm=0.8):
     bpy.ops.object.modifier_apply(modifier=weld_mod.name)
 
     verts_after = len(obj.data.vertices)
-    print(f"  ✅ Selective solidify applied: {verts_before} → {verts_after} vertices "
+    print(f"  Selective solidify complete: {verts_before} -> {verts_after} vertices "
           f"(+{verts_after - verts_before})", flush=True)
 
     return len(thin_face_indices)
