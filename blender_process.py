@@ -480,6 +480,7 @@ def fix_normals_per_shell(obj):
     bvh = BVHTree.FromBMesh(bm)
 
     total_flipped = 0
+    shells_flipped = 0
     volume_threshold = 0.01  # mm³ — below this, volume test is inconclusive
 
     for i, shell in enumerate(shells):
@@ -496,15 +497,11 @@ def fix_normals_per_shell(obj):
                 signed_vol += v0.dot(v1.cross(v2)) / 6.0
 
         needs_flip = False
-        method = ""
 
         if abs(signed_vol) > volume_threshold:
             # Volume test is conclusive
             if signed_vol < 0:
                 needs_flip = True
-                method = "volume"
-            else:
-                method = "volume"
         else:
             # Near-zero volume — use ray-cast heuristic.
             # Cast rays from face centroids along their normals.
@@ -535,28 +532,18 @@ def fix_normals_per_shell(obj):
 
             if inward_votes > outward_votes:
                 needs_flip = True
-                method = f"raycast({inward_votes}in/{outward_votes}out)"
-            else:
-                method = f"raycast({inward_votes}in/{outward_votes}out)"
 
         if needs_flip:
             for face in shell:
                 face.normal_flip()
             total_flipped += len(shell)
-            status = f"🔄 FLIPPED ({method})"
-        else:
-            status = f"✅ OK ({method})"
-
-        # Log: always log flipped shells; log all if ≤20 shells
-        if len(shells) <= 20 or needs_flip:
-            print(f"    Shell {i}: {len(shell)} faces, "
-                  f"vol={signed_vol:.2f}mm³ → {status}", flush=True)
+            shells_flipped += 1
 
     if total_flipped > 0:
-        print(f"  🔄 Flipped normals on {total_flipped} faces across shell(s)",
+        print(f"  🔄 Flipped {total_flipped} faces across {shells_flipped} shell(s)",
               flush=True)
     else:
-        print(f"  ✅ All shell normals already point outward", flush=True)
+        print(f"  ✅ All {len(shells)} shell normals already point outward", flush=True)
 
     bm.to_mesh(obj.data)
     bm.free()
@@ -639,18 +626,15 @@ def remove_ghost_shells(obj, min_faces=50):
         n_faces = len(shell)
         if i == 0:
             # Always keep the largest shell
-            print(f"  Shell {i}: {n_faces} faces → ✅ KEEP (main)", flush=True)
             kept_count += 1
             kept_faces_total += n_faces
         elif n_faces < min_faces:
             # Ghost shell — mark for deletion
-            print(f"  Shell {i}: {n_faces} faces → 🗑️ REMOVED (ghost)", flush=True)
             faces_to_delete.extend(shell)
             removed_count += 1
             removed_faces_total += n_faces
         else:
             # Large enough to be a legitimate sub-object
-            print(f"  Shell {i}: {n_faces} faces → ✅ KEEP (above threshold)", flush=True)
             kept_count += 1
             kept_faces_total += n_faces
 
