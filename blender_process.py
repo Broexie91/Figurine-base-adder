@@ -692,6 +692,46 @@ def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
     print(f"  ✅ Pinned {fixed} out-of-range UV loops → {uv_coord} (original atlas untouched)", flush=True)
 
 
+def pin_base_face_uvs(obj, base_top_z, uv_coord=(0.008, 0.008)):
+    """
+    Force all faces in the base region to use the grey sentinel UV.
+
+    After a boolean union, seam faces between the figurine and base get
+    interpolated UVs from the figurine texture (skin, clothing, etc.).
+    These UVs are valid (within 0-1) so pin_new_face_uvs doesn't catch them.
+
+    This function identifies base faces by their Z position: any face whose
+    centre is at or below base_top_z is pinned to the grey sentinel patch.
+
+    Args:
+        obj: The merged model object (after boolean union).
+        base_top_z: The Z coordinate of the base's top surface.
+        uv_coord: UV coordinate for the grey sentinel patch.
+    """
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.active
+    if not uv_layer:
+        print("  ⚠️  No active UV layer found, skipping base UV pin.")
+        return
+
+    pinned_loops = 0
+    total_base_faces = 0
+
+    for poly in mesh.polygons:
+        # Check if the face centre is in the base region
+        if poly.center.z <= base_top_z:
+            total_base_faces += 1
+            for loop_idx in poly.loop_indices:
+                current_uv = uv_layer.data[loop_idx].uv
+                # Only pin if not already at the sentinel coordinate
+                if abs(current_uv[0] - uv_coord[0]) > 0.001 or abs(current_uv[1] - uv_coord[1]) > 0.001:
+                    uv_layer.data[loop_idx].uv = uv_coord
+                    pinned_loops += 1
+
+    print(f"  ✅ Base UV fix: pinned {pinned_loops} loops on {total_base_faces} base faces "
+          f"(Z ≤ {base_top_z:.2f}mm)", flush=True)
+
+
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     """
     Hardened Boolean union cascade:
@@ -960,6 +1000,8 @@ try:
         com_xy    = Vector((com_world.x, com_world.y))
         print(f"  Centre of mass (XY): ({com_xy.x:.1f}, {com_xy.y:.1f})mm", flush=True)
 
+        base_top_z = foot_bmin_z + 0.5  # matches build_convex_base top_z
+
         base = build_convex_base(
             foot_verts,
             bmin_z        = foot_bmin_z,
@@ -979,10 +1021,15 @@ try:
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
 
-        # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
-        # Original Meshy AI atlas UVs are NOT touched.
+        # Repair UVs: pin out-of-range UVs (boolean artifacts)
         print("Pinning out-of-range UVs after base union...")
         pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
+
+        # Force all base-region faces to grey sentinel UV.
+        # Boolean seam faces get interpolated UVs from the figurine texture
+        # (valid but wrong), so pin_new_face_uvs misses them.
+        print("Pinning base-region face UVs to grey...")
+        pin_base_face_uvs(model, base_top_z=base_top_z, uv_coord=(0.008, 0.008))
 
         # Post-boolean repair on unified mesh
         if not skip_repair:
