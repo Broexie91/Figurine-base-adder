@@ -948,16 +948,19 @@ try:
                     # IMPORTANT — coordinate system:
                     #   Blender UV: Y=0 is the BOTTOM of the texture.
                     #   PIL image:  Y=0 is the TOP of the image.
-                    #   So UV (0.008, 0.008) → PIL pixel X=16, Y=image.height-16
-                    #   i.e. the patch must be at the BOTTOM of the PIL image.
+                    #   The patch must cover UV (0, 0) to at least UV (0.02, 0.02)
+                    #   so that base UVs at (0.008, 0.008) always land inside.
                     #
-                    # - Bottom 32×32 of PIL image (= UV bottom-left corner) →
-                    #   medium grey RGB(160,160,160) = base colour
+                    # Patch size is computed dynamically from texture resolution:
+                    #   UV 0.02 * 4096 = 82px, UV 0.02 * 2048 = 41px
+                    #   We use max(64, ...) as a floor for safety.
+                    tex_w, tex_h = img.size[0], img.size[1]
+                    patch_px = max(64, int(tex_w * 0.025))  # cover UV 0→0.025
                     patch_script = (
                         "from PIL import Image, ImageDraw; "
                         f"img=Image.open(r'{texture_path}').convert('RGBA'); "
                         "d=ImageDraw.Draw(img); "
-                        "d.rectangle([0,img.height-32,31,img.height-1], fill=(160,160,160,255)); "  # base: grey at UV (0,0) corner
+                        f"d.rectangle([0,img.height-{patch_px},{patch_px-1},img.height-1], fill=(160,160,160,255)); "
                         f"img.save(r'{texture_path}')"
                     )
                     try:
@@ -967,7 +970,7 @@ try:
                             capture_output=True, text=True, timeout=30
                         )
                         if _result.returncode == 0:
-                            print("✅ Sentinel pixels patched via PIL (8×8 patches)")
+                            print(f"✅ Sentinel pixels patched via PIL ({patch_px}×{patch_px}px on {tex_w}×{tex_h} texture)")
                         else:
                             print(f"⚠️  PIL patch failed (non-fatal): {_result.stderr.strip()}")
                     except Exception as _e:
