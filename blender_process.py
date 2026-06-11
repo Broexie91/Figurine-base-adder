@@ -951,13 +951,17 @@ try:
             com_xy        = com_xy,
         )
 
-        # Give the base its own grey material (separate from figurine texture).
-        # This is much more robust than UV-pinning: material indices survive
-        # the boolean union, so base faces stay grey automatically without
-        # needing Z-based face selection (which caused figurine feet to turn grey).
+        # Create a separate grey material for the base.
         gray_mat = bpy.data.materials.new(name="Base_Grey")
         gray_mat.use_nodes = False
         gray_mat.diffuse_color = (0.627, 0.627, 0.627, 1.0)  # RGB ~#A0A0A0
+
+        # Add grey material to the MODEL before the boolean so it exists as
+        # a material slot that faces can reference after the merge.
+        model.data.materials.append(gray_mat)
+        gray_mat_index = len(model.data.materials) - 1
+
+        # Also assign it to the base object so Blender knows its material.
         base.data.materials.append(gray_mat)
 
         # Base needs a UV layer for Blender internals (boolean ops expect it),
@@ -967,6 +971,23 @@ try:
 
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
+
+        # Fix material assignment for base faces.
+        # The FLOAT boolean solver does NOT transfer material indices from
+        # the tool object — all faces get material_index=0 (figurine texture).
+        # Fix by identifying base faces via Z-position and assigning the grey
+        # material. Using foot_bmin_z as threshold is safe: no figurine geometry
+        # exists below the figurine's lowest vertex, so only actual base faces
+        # are caught (unlike the old UV-pinning approach which used base_top_z
+        # and accidentally caught figurine feet).
+        base_faces_fixed = 0
+        for poly in model.data.polygons:
+            if poly.center.z <= foot_bmin_z:
+                if poly.material_index != gray_mat_index:
+                    poly.material_index = gray_mat_index
+                    base_faces_fixed += 1
+        print(f"  🎨 Assigned Base_Grey material to {base_faces_fixed} base faces "
+              f"(Z ≤ {foot_bmin_z:.2f}mm, material_index={gray_mat_index})", flush=True)
 
         # Fix any out-of-range UVs created by the boolean operation
         print("Pinning out-of-range UVs after base union...")
