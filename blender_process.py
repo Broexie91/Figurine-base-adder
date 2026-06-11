@@ -923,67 +923,6 @@ try:
     else:
         print("⚡ Skipping mesh repair (skip_repair=true)", flush=True)
 
-    # ====================== TEXTURE EXPORT ======================
-    out_dir = os.path.dirname(output_path)
-    texture_path = os.path.join(out_dir, "model.png")
-    found_texture = False
-    print("Searching for embedded textures...", flush=True)
-
-    for mat in bpy.data.materials:
-        if mat.use_nodes:
-            for node in mat.node_tree.nodes:
-                if node.type == 'TEX_IMAGE' and node.image:
-                    img = node.image
-                    print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
-
-                    # Step 1: Save as-is — fast, no pixel decode in Blender's float buffer.
-                    img.filepath_raw = texture_path
-                    img.file_format = 'PNG'
-                    img.save()
-                    found_texture = True
-                    print(f"✅ Texture saved: {texture_path}")
-
-                    # Step 2: Patch sentinel corner pixels via Pillow subprocess.
-                    #
-                    # IMPORTANT — coordinate system:
-                    #   Blender UV: Y=0 is the BOTTOM of the texture.
-                    #   PIL image:  Y=0 is the TOP of the image.
-                    #   The patch must cover UV (0, 0) to at least UV (0.02, 0.02)
-                    #   so that base UVs at (0.008, 0.008) always land inside.
-                    #
-                    # Patch size is computed dynamically from texture resolution:
-                    #   UV 0.02 * 4096 = 82px, UV 0.02 * 2048 = 41px
-                    #   We use max(64, ...) as a floor for safety.
-                    tex_w, tex_h = img.size[0], img.size[1]
-                    patch_px = max(64, int(tex_w * 0.025))  # cover UV 0→0.025
-                    patch_script = (
-                        "from PIL import Image, ImageDraw; "
-                        f"img=Image.open(r'{texture_path}').convert('RGBA'); "
-                        "d=ImageDraw.Draw(img); "
-                        f"d.rectangle([0,img.height-{patch_px},{patch_px-1},img.height-1], fill=(160,160,160,255)); "
-                        f"img.save(r'{texture_path}')"
-                    )
-                    try:
-                        import subprocess as _sp
-                        _result = _sp.run(
-                            ["/venv/bin/python", "-c", patch_script],
-                            capture_output=True, text=True, timeout=30
-                        )
-                        if _result.returncode == 0:
-                            print(f"✅ Sentinel pixels patched via PIL ({patch_px}×{patch_px}px on {tex_w}×{tex_h} texture)")
-                        else:
-                            print(f"⚠️  PIL patch failed (non-fatal): {_result.stderr.strip()}")
-                    except Exception as _e:
-                        print(f"⚠️  PIL patch skipped (non-fatal): {_e}")
-
-                    break
-        if found_texture:
-            break
-
-    if not found_texture:
-        print("⚠️  No embedded texture found.")
-
-
     # ====================== BASE ======================
     bmin, bmax = get_bounds([model])
 
@@ -1003,8 +942,6 @@ try:
         com_xy    = Vector((com_world.x, com_world.y))
         print(f"  Centre of mass (XY): ({com_xy.x:.1f}, {com_xy.y:.1f})mm", flush=True)
 
-        base_top_z = foot_bmin_z + 0.5  # matches build_convex_base top_z
-
         base = build_convex_base(
             foot_verts,
             bmin_z        = foot_bmin_z,
@@ -1014,25 +951,26 @@ try:
             com_xy        = com_xy,
         )
 
-        if len(model.data.materials) > 0:
-            base.data.materials.append(model.data.materials[0])
-            uv_layer = base.data.uv_layers.new(name=model.data.uv_layers.active.name
-                                                if model.data.uv_layers.active else "UVMap")
-            for loop in base.data.loops:
-                uv_layer.data[loop.index].uv = (0.008, 0.008)
+        # Give the base its own grey material (separate from figurine texture).
+        # This is much more robust than UV-pinning: material indices survive
+        # the boolean union, so base faces stay grey automatically without
+        # needing Z-based face selection (which caused figurine feet to turn grey).
+        gray_mat = bpy.data.materials.new(name="Base_Grey")
+        gray_mat.use_nodes = False
+        gray_mat.diffuse_color = (0.627, 0.627, 0.627, 1.0)  # RGB ~#A0A0A0
+        base.data.materials.append(gray_mat)
+
+        # Base needs a UV layer for Blender internals (boolean ops expect it),
+        # but the UVs don't matter since the grey material has no texture.
+        if model.data.uv_layers.active:
+            base.data.uv_layers.new(name=model.data.uv_layers.active.name)
 
         # Union base into model
         robust_boolean_union(model, base, "Base_Union")
 
-        # Repair UVs: pin out-of-range UVs (boolean artifacts)
+        # Fix any out-of-range UVs created by the boolean operation
         print("Pinning out-of-range UVs after base union...")
         pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
-
-        # Force all base-region faces to grey sentinel UV.
-        # Boolean seam faces get interpolated UVs from the figurine texture
-        # (valid but wrong), so pin_new_face_uvs misses them.
-        print("Pinning base-region face UVs to grey...")
-        pin_base_face_uvs(model, base_top_z=base_top_z, uv_coord=(0.008, 0.008))
 
         # Post-boolean repair on unified mesh
         if not skip_repair:
@@ -1115,6 +1053,33 @@ try:
 
             open_e, non_m = check_manifold(model)
             print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+    # ====================== TEXTURE EXPORT ======================
+    # Extract the embedded texture from the GLB and save as PNG.
+    # No sentinel pixel patching needed — the base has its own grey material.
+    out_dir = os.path.dirname(output_path)
+    texture_path = os.path.join(out_dir, "model.png")
+    found_texture = False
+    print("Searching for embedded textures...", flush=True)
+
+    for mat in bpy.data.materials:
+        if mat.use_nodes:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    img = node.image
+                    print(f"Texture found: {img.name} ({img.size[0]}x{img.size[1]})")
+
+                    img.filepath_raw = texture_path
+                    img.file_format = 'PNG'
+                    img.save()
+                    found_texture = True
+                    print(f"✅ Texture saved: {texture_path}")
+                    break
+        if found_texture:
+            break
+
+    if not found_texture:
+        print("⚠️  No embedded texture found.")
 
     # ====================== FINAL MANIFOLD GATE ======================
     if not skip_repair:
