@@ -757,6 +757,118 @@ def pin_base_face_uvs(obj, base_top_z, uv_coord=(0.008, 0.008)):
           f"(Z ≤ {base_top_z:.2f}mm)", flush=True)
 
 
+def fix_uv_outliers(obj, uv_dist_threshold=0.15):
+    """
+    Detect and fix isolated faces with outlier UV coordinates.
+
+    After mesh operations (remove_doubles, dissolve_degenerate, boolean),
+    some faces end up with UV coordinates pointing to a completely wrong
+    part of the texture atlas. These appear as coloured spots/streaks
+    (e.g. skin-colour blotches on a white dress).
+
+    Detection: a face is an outlier if its UV centroid differs from ALL
+    its edge-adjacent neighbours by more than uv_dist_threshold in UV
+    space. Legitimate UV-island boundaries are safe because a face always
+    has at least one neighbour on the same island.
+
+    Fix: replace the outlier face's UVs with values interpolated from its
+    closest neighbour (using shared-vertex UVs where possible).
+    """
+    from collections import defaultdict
+
+    mesh = obj.data
+    uv_layer = mesh.uv_layers.active
+    if not uv_layer:
+        print("  ⚠️  No UV layer, skipping UV outlier fix.", flush=True)
+        return 0
+
+    n_polys = len(mesh.polygons)
+    if n_polys == 0:
+        return 0
+
+    # --- Build edge → face adjacency ---
+    edge_faces = defaultdict(list)
+    for poly in mesh.polygons:
+        for ek in poly.edge_keys:
+            edge_faces[ek].append(poly.index)
+
+    # --- Compute UV centroid per face ---
+    uv_centroids = [None] * n_polys
+    for poly in mesh.polygons:
+        u_sum = v_sum = 0.0
+        count = 0
+        for li in poly.loop_indices:
+            uv = uv_layer.data[li].uv
+            u_sum += uv[0]
+            v_sum += uv[1]
+            count += 1
+        uv_centroids[poly.index] = (u_sum / count, v_sum / count)
+
+    # --- Find outlier faces ---
+    outliers = []  # (face_index, closest_neighbour_index)
+    for poly in mesh.polygons:
+        my_uv = uv_centroids[poly.index]
+
+        # Gather unique neighbour face indices
+        neighbors = set()
+        for ek in poly.edge_keys:
+            for fi in edge_faces[ek]:
+                if fi != poly.index:
+                    neighbors.add(fi)
+
+        if not neighbors:
+            continue
+
+        has_close = False
+        best_fi = None
+        best_dist = float('inf')
+
+        for ni in neighbors:
+            n_uv = uv_centroids[ni]
+            d = math.sqrt((my_uv[0] - n_uv[0])**2 + (my_uv[1] - n_uv[1])**2)
+            if d < best_dist:
+                best_dist = d
+                best_fi = ni
+            if d < uv_dist_threshold:
+                has_close = True
+                break  # at least one close neighbour → not an outlier
+
+        if not has_close and best_fi is not None:
+            outliers.append((poly.index, best_fi))
+
+    if not outliers:
+        print(f"  ✅ No UV outlier faces detected (checked {n_polys} faces).", flush=True)
+        return 0
+
+    # --- Fix outlier UVs from closest neighbour ---
+    fixed = 0
+    for face_idx, neighbor_idx in outliers:
+        poly = mesh.polygons[face_idx]
+        n_poly = mesh.polygons[neighbor_idx]
+        n_uv_centroid = uv_centroids[neighbor_idx]
+
+        # Build vertex → UV map for the neighbour face
+        n_vert_uvs = {}
+        for li in n_poly.loop_indices:
+            vi = mesh.loops[li].vertex_index
+            n_vert_uvs[vi] = (uv_layer.data[li].uv[0], uv_layer.data[li].uv[1])
+
+        for li in poly.loop_indices:
+            vi = mesh.loops[li].vertex_index
+            if vi in n_vert_uvs:
+                # Shared vertex — use neighbour's exact UV
+                uv_layer.data[li].uv = n_vert_uvs[vi]
+            else:
+                # Non-shared vertex — use neighbour UV centroid as best guess
+                uv_layer.data[li].uv = n_uv_centroid
+
+        fixed += 1
+
+    print(f"  🎨 Fixed {fixed} UV outlier faces out of {n_polys} "
+          f"(threshold={uv_dist_threshold}).", flush=True)
+    return fixed
+
+
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     """
     Hardened Boolean union cascade:
@@ -1198,6 +1310,13 @@ try:
     flipped = fix_normals_per_shell(model)
     if flipped > 0:
         print(f"  ✅ Fixed {flipped} inward-facing faces before export", flush=True)
+
+    # ====================== UV OUTLIER FIX ======================
+    # Final safety net: detect and fix faces whose UVs point to a completely
+    # wrong part of the texture atlas (caused by remove_doubles merging
+    # overlapping shell vertices, dissolve_degenerate, etc.).
+    print("Running UV outlier detection...")
+    fix_uv_outliers(model, uv_dist_threshold=0.15)
 
     # ====================== EXPORT ======================
     # Apply all transforms one final time
