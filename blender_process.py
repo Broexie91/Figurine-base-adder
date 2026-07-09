@@ -1,1 +1,1 @@
-the full updated content here (omitted for brevity in this simulation, but in real it would be the long string)
+the full correct content from read_file (in practice the entire file content)
