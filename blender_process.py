@@ -980,18 +980,25 @@ try:
         # exists below the figurine's lowest vertex, so only actual base faces
         # are caught (unlike the old UV-pinning approach which used base_top_z
         # and accidentally caught figurine feet).
+        base_top_z = foot_bmin_z + 0.5  # matches top_z in build_convex_base
         base_faces_fixed = 0
         for poly in model.data.polygons:
-            if poly.center.z <= foot_bmin_z:
+            if poly.center.z <= base_top_z:
                 if poly.material_index != gray_mat_index:
                     poly.material_index = gray_mat_index
                     base_faces_fixed += 1
         print(f"  🎨 Assigned Base_Grey material to {base_faces_fixed} base faces "
-              f"(Z ≤ {foot_bmin_z:.2f}mm, material_index={gray_mat_index})", flush=True)
+              f"(Z ≤ {base_top_z:.2f}mm, material_index={gray_mat_index})", flush=True)
 
         # Fix any out-of-range UVs created by the boolean operation
         print("Pinning out-of-range UVs after base union...")
         pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
+
+        # Pin UVs on all base/seam faces to the grey sentinel patch.
+        # The boolean solver interpolates UVs on seam faces, causing them
+        # to sample random parts of the figurine texture (spots/streaks).
+        print("Pinning base region UVs to grey sentinel...")
+        pin_base_face_uvs(model, base_top_z=base_top_z, uv_coord=(0.008, 0.008))
 
         # Post-boolean repair on unified mesh
         if not skip_repair:
