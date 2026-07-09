@@ -282,9 +282,34 @@ def repair_mesh(obj, merge_threshold=0.01):
     # 3. Fill holes (close open boundary loops)
     # holes_fill finds boundary edge loops and fills them with faces
     bm.edges.ensure_lookup_table()
+    uv_layer = bm.loops.layers.uv.active
     try:
         result = bmesh.ops.holes_fill(bm, edges=bm.edges[:], sides=0)
-        stats['holes_filled'] = len(result.get('faces', []))
+        new_faces = result.get('faces', [])
+        stats['holes_filled'] = len(new_faces)
+
+        # Fix UVs on newly filled faces by interpolating from adjacent geometry.
+        # holes_fill creates new faces with default (0,0) UVs which sample
+        # random parts of the texture atlas, causing visible spots/streaks
+        # on the figurine (e.g. coloured blotches on a white dress).
+        if uv_layer and new_faces:
+            new_face_set = set(new_faces)
+            fixed_loops = 0
+            for face in new_faces:
+                for loop in face.loops:
+                    vert = loop.vert
+                    # Collect UVs from this vertex's loops on existing (non-new) faces
+                    neighbor_uvs = []
+                    for other_loop in vert.link_loops:
+                        if other_loop.face not in new_face_set:
+                            neighbor_uvs.append(other_loop[uv_layer].uv.copy())
+                    if neighbor_uvs:
+                        avg_u = sum(uv.x for uv in neighbor_uvs) / len(neighbor_uvs)
+                        avg_v = sum(uv.y for uv in neighbor_uvs) / len(neighbor_uvs)
+                        loop[uv_layer].uv = (avg_u, avg_v)
+                        fixed_loops += 1
+            print(f"  🎨 Interpolated UVs for {fixed_loops} loops on "
+                  f"{len(new_faces)} hole-filled faces", flush=True)
     except (TypeError, AttributeError):
         # Fallback for Blender versions where holes_fill has different signature
         # Use the bpy.ops approach as absolute last resort
