@@ -767,14 +767,18 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
     (e.g. skin-colour blotches on a white dress).
 
     Detection: a face is an outlier if its UV centroid differs from ALL
-    its edge-adjacent neighbours by more than uv_dist_threshold in UV
+    its vertex-adjacent neighbours by more than uv_dist_threshold in UV
     space. Legitimate UV-island boundaries are safe because a face always
     has at least one neighbour on the same island.
 
     Fix: replace the outlier face's UVs with values interpolated from its
     closest neighbour (using shared-vertex UVs where possible).
+
+    Optimised with numpy foreach_get/foreach_set for bulk data access,
+    vertex-face adjacency (instead of edge-face), and squared-distance
+    early-break to handle 300K+ face meshes within seconds.
     """
-    from collections import defaultdict
+    import numpy as np
 
     mesh = obj.data
     uv_layer = mesh.uv_layers.active
@@ -783,90 +787,111 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
         return 0
 
     n_polys = len(mesh.polygons)
+    n_loops = len(mesh.loops)
+    n_verts = len(mesh.vertices)
     if n_polys == 0:
         return 0
 
-    # --- Build edge → face adjacency ---
-    edge_faces = defaultdict(list)
-    for poly in mesh.polygons:
-        for ek in poly.edge_keys:
-            edge_faces[ek].append(poly.index)
+    print(f"  Scanning {n_polys} faces for UV outliers...", flush=True)
 
-    # --- Compute UV centroid per face ---
-    uv_centroids = [None] * n_polys
-    for poly in mesh.polygons:
-        u_sum = v_sum = 0.0
-        count = 0
-        for li in poly.loop_indices:
-            uv = uv_layer.data[li].uv
-            u_sum += uv[0]
-            v_sum += uv[1]
-            count += 1
-        uv_centroids[poly.index] = (u_sum / count, v_sum / count)
+    # --- Bulk data extraction via fast C-level calls ---
+    uv_data = np.empty(n_loops * 2, dtype=np.float64)
+    uv_layer.data.foreach_get("uv", uv_data)
+    uv_data = uv_data.reshape(n_loops, 2)
 
-    # --- Find outlier faces ---
+    loop_starts = np.empty(n_polys, dtype=np.int32)
+    loop_totals = np.empty(n_polys, dtype=np.int32)
+    mesh.polygons.foreach_get("loop_start", loop_starts)
+    mesh.polygons.foreach_get("loop_total", loop_totals)
+
+    vert_indices = np.empty(n_loops, dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", vert_indices)
+
+    # --- UV centroid per face (vectorised for tri meshes, loop fallback) ---
+    uv_centroids = np.zeros((n_polys, 2), dtype=np.float64)
+    if np.all(loop_totals == 3):
+        uv_centroids = uv_data.reshape(n_polys, 3, 2).mean(axis=1)
+    elif np.all(loop_totals == loop_totals[0]):
+        k = int(loop_totals[0])
+        uv_centroids = uv_data.reshape(n_polys, k, 2).mean(axis=1)
+    else:
+        for i in range(n_polys):
+            s = int(loop_starts[i])
+            t = int(loop_totals[i])
+            uv_centroids[i] = uv_data[s:s+t].mean(axis=0)
+
+    # --- Vertex → face adjacency (list-of-lists, fast to build) ---
+    vert_to_faces = [[] for _ in range(n_verts)]
+    for i in range(n_polys):
+        s = int(loop_starts[i])
+        t = int(loop_totals[i])
+        for j in range(s, s + t):
+            vert_to_faces[vert_indices[j]].append(i)
+
+    # --- Find outlier faces (squared-distance + early break) ---
+    threshold_sq = uv_dist_threshold * uv_dist_threshold
     outliers = []  # (face_index, closest_neighbour_index)
-    for poly in mesh.polygons:
-        my_uv = uv_centroids[poly.index]
 
-        # Gather unique neighbour face indices
-        neighbors = set()
-        for ek in poly.edge_keys:
-            for fi in edge_faces[ek]:
-                if fi != poly.index:
-                    neighbors.add(fi)
-
-        if not neighbors:
-            continue
+    for i in range(n_polys):
+        cx, cy = uv_centroids[i]
+        s = int(loop_starts[i])
+        t = int(loop_totals[i])
 
         has_close = False
-        best_fi = None
-        best_dist = float('inf')
+        best_fi = -1
+        best_dsq = float('inf')
 
-        for ni in neighbors:
-            n_uv = uv_centroids[ni]
-            d = math.sqrt((my_uv[0] - n_uv[0])**2 + (my_uv[1] - n_uv[1])**2)
-            if d < best_dist:
-                best_dist = d
-                best_fi = ni
-            if d < uv_dist_threshold:
-                has_close = True
-                break  # at least one close neighbour → not an outlier
+        for j in range(s, s + t):
+            for ni in vert_to_faces[vert_indices[j]]:
+                if ni == i:
+                    continue
+                dx = cx - uv_centroids[ni, 0]
+                dy = cy - uv_centroids[ni, 1]
+                dsq = dx * dx + dy * dy
+                if dsq < threshold_sq:
+                    has_close = True
+                    break
+                if dsq < best_dsq:
+                    best_dsq = dsq
+                    best_fi = ni
+            if has_close:
+                break
 
-        if not has_close and best_fi is not None:
-            outliers.append((poly.index, best_fi))
+        if not has_close and best_fi >= 0:
+            outliers.append((i, best_fi))
 
     if not outliers:
         print(f"  ✅ No UV outlier faces detected (checked {n_polys} faces).", flush=True)
         return 0
 
     # --- Fix outlier UVs from closest neighbour ---
-    fixed = 0
     for face_idx, neighbor_idx in outliers:
-        poly = mesh.polygons[face_idx]
-        n_poly = mesh.polygons[neighbor_idx]
-        n_uv_centroid = uv_centroids[neighbor_idx]
+        s  = int(loop_starts[face_idx])
+        t  = int(loop_totals[face_idx])
+        ns = int(loop_starts[neighbor_idx])
+        nt = int(loop_totals[neighbor_idx])
 
-        # Build vertex → UV map for the neighbour face
+        # Build vertex → UV map for the neighbour
         n_vert_uvs = {}
-        for li in n_poly.loop_indices:
-            vi = mesh.loops[li].vertex_index
-            n_vert_uvs[vi] = (uv_layer.data[li].uv[0], uv_layer.data[li].uv[1])
+        for j in range(ns, ns + nt):
+            n_vert_uvs[int(vert_indices[j])] = uv_data[j].copy()
 
-        for li in poly.loop_indices:
-            vi = mesh.loops[li].vertex_index
+        n_centroid = uv_centroids[neighbor_idx]
+
+        for j in range(s, s + t):
+            vi = int(vert_indices[j])
             if vi in n_vert_uvs:
-                # Shared vertex — use neighbour's exact UV
-                uv_layer.data[li].uv = n_vert_uvs[vi]
+                uv_data[j] = n_vert_uvs[vi]      # shared vertex → exact UV
             else:
-                # Non-shared vertex — use neighbour UV centroid as best guess
-                uv_layer.data[li].uv = n_uv_centroid
+                uv_data[j] = n_centroid           # fallback → centroid
 
-        fixed += 1
+    # --- Write all UVs back in one C-level call ---
+    uv_layer.data.foreach_set("uv", uv_data.ravel())
 
-    print(f"  🎨 Fixed {fixed} UV outlier faces out of {n_polys} "
+    print(f"  🎨 Fixed {len(outliers)} UV outlier faces out of {n_polys} "
           f"(threshold={uv_dist_threshold}).", flush=True)
-    return fixed
+    return len(outliers)
+
 
 
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
@@ -1289,6 +1314,14 @@ try:
     remove_ghost_shells(model, min_faces=50)
 
 
+    # ====================== UV OUTLIER FIX ======================
+    # Safety net: detect and fix faces whose UVs point to a completely
+    # wrong part of the texture atlas (caused by remove_doubles merging
+    # overlapping shell vertices, dissolve_degenerate, etc.).
+    # Runs BEFORE triangulation to halve the face count (~365K vs ~730K).
+    print("Running UV outlier detection...")
+    fix_uv_outliers(model, uv_dist_threshold=0.15)
+
     # ====================== TRIANGULATE ======================
     # Guarantee all faces are triangles — ngons from fill_holes can cause
     # issues with some slicers and Marketiger's validator.
@@ -1310,13 +1343,6 @@ try:
     flipped = fix_normals_per_shell(model)
     if flipped > 0:
         print(f"  ✅ Fixed {flipped} inward-facing faces before export", flush=True)
-
-    # ====================== UV OUTLIER FIX ======================
-    # Final safety net: detect and fix faces whose UVs point to a completely
-    # wrong part of the texture atlas (caused by remove_doubles merging
-    # overlapping shell vertices, dissolve_degenerate, etc.).
-    print("Running UV outlier detection...")
-    fix_uv_outliers(model, uv_dist_threshold=0.15)
 
     # ====================== EXPORT ======================
     # Apply all transforms one final time
