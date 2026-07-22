@@ -4,7 +4,9 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Systeem packages + xz-utils (nodig voor Blender .tar.xz)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --fix-missing + apt-get clean maakt de build robuuster tegen tijdelijke mirror issues
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends --fix-missing \
     python3 \
     python3-pip \
     python3-venv \
@@ -25,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     xz-utils \
     unzip \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Officiële Blender 5.1 installeren (stabiel in headless mode)
