@@ -892,7 +892,7 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
     return len(outliers)
 
 
-def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
+def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normals=True):
     """
     Hardened Boolean union cascade:
       1. FLOAT solver  (fast, local intersection only — preferred for AI meshes)
@@ -901,6 +901,9 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
 
     After each boolean attempt, verifies the result with a manifold check.
     Returns True if a real boolean succeeded, False if JOIN was used.
+
+    fix_normals: when False (raw/skip_repair mode) the original face normals
+                 of the figurine are left completely untouched.
     """
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
@@ -923,7 +926,7 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
             success = new_verts != vert_before
             print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ silent failure'}")
 
-            if success:
+            if success and fix_normals:
                 # Verify the result: recalculate normals on the combined mesh
                 bm = bmesh.new()
                 bm.from_mesh(target_obj.data)
@@ -931,6 +934,8 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
                 bm.to_mesh(target_obj.data)
                 bm.free()
                 target_obj.data.update()
+            elif success and not fix_normals:
+                print(f"  ⚡ Skipping post-boolean normals recalc (raw mode — original faces untouched)", flush=True)
 
             return success
         except Exception as e:
@@ -974,9 +979,12 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union"):
     bm.verts.ensure_lookup_table()
     welded = before_verts - len(bm.verts)
 
-    # Recalculate normals after join
-    bm.faces.ensure_lookup_table()
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    # Recalculate normals after join (only if allowed)
+    if fix_normals:
+        bm.faces.ensure_lookup_table()
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    else:
+        print(f"  ⚡ Skipping post-JOIN normals recalc (raw mode — original faces untouched)", flush=True)
 
     bm.to_mesh(target_obj.data)
     bm.free()
@@ -1134,7 +1142,8 @@ try:
             base.data.uv_layers.new(name=model.data.uv_layers.active.name)
 
         # Union base into model
-        robust_boolean_union(model, base, "Base_Union")
+        # In raw/skip_repair mode we deliberately leave all original face normals untouched
+        robust_boolean_union(model, base, "Base_Union", fix_normals=not skip_repair)
 
         # Fix material assignment for base faces.
         # The FLOAT boolean solver does NOT transfer material indices from
@@ -1233,7 +1242,7 @@ try:
                 for loop in torus.data.loops:
                     torus.data.uv_layers.active.data[loop.index].uv = fallback_uv
 
-        robust_boolean_union(model, torus, "Keychain_Union")
+        robust_boolean_union(model, torus, "Keychain_Union", fix_normals=not skip_repair)
 
         # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
         print("Pinning out-of-range UVs after keychain union...")
@@ -1317,35 +1326,40 @@ try:
         print("⚡ Skipping ghost shell removal in SKIP_REPAIR mode (to preserve pleats and fine details)", flush=True)
 
 
-    # ====================== UV OUTLIER FIX ======================
-    # Safety net: detect and fix faces whose UVs point to a completely
-    # wrong part of the texture atlas (caused by remove_doubles merging
-    # overlapping shell vertices, dissolve_degenerate, etc.).
-    # Runs BEFORE triangulation to halve the face count (~365K vs ~730K).
-    print("Running UV outlier detection...")
-    fix_uv_outliers(model, uv_dist_threshold=0.15)
+    # ====================== UV OUTLIER FIX / TRIANGULATE / NORMALS ======================
+    # In SKIP_REPAIR (add-base-raw) mode we deliberately leave the original model
+    # completely untouched: no UV changes, no triangulation, no normal flips.
+    # Only scale + base (or keychain) addition happen. Export may still triangulate.
+    if not skip_repair:
+        # Safety net: detect and fix faces whose UVs point to a completely
+        # wrong part of the texture atlas (caused by remove_doubles merging
+        # overlapping shell vertices, dissolve_degenerate, etc.).
+        # Runs BEFORE triangulation to halve the face count (~365K vs ~730K).
+        print("Running UV outlier detection...")
+        fix_uv_outliers(model, uv_dist_threshold=0.15)
 
-    # ====================== TRIANGULATE ======================
-    # Guarantee all faces are triangles — ngons from fill_holes can cause
-    # issues with some slicers and Marketiger's validator.
-    print("Triangulating mesh...")
-    bpy.ops.object.select_all(action='DESELECT')
-    model.select_set(True)
-    bpy.context.view_layer.objects.active = model
-    mod = model.modifiers.new("Triangulate", 'TRIANGULATE')
-    mod.quad_method = 'BEAUTY'
-    mod.ngon_method = 'BEAUTY'
-    bpy.ops.object.modifier_apply(modifier=mod.name)
-    print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
+        # Guarantee all faces are triangles — ngons from fill_holes can cause
+        # issues with some slicers and Marketiger's validator.
+        print("Triangulating mesh...")
+        bpy.ops.object.select_all(action='DESELECT')
+        model.select_set(True)
+        bpy.context.view_layer.objects.active = model
+        mod = model.modifiers.new("Triangulate", 'TRIANGULATE')
+        mod.quad_method = 'BEAUTY'
+        mod.ngon_method = 'BEAUTY'
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
 
-    # ====================== FINAL NORMALS FIX ======================
-    # Per-shell signed-volume normals correction.
-    # This MUST run after triangulation (so all faces are tris for accurate
-    # volume computation) and before export (so the OBJ has correct normals).
-    print("Running final per-shell normals fix...")
-    flipped = fix_normals_per_shell(model)
-    if flipped > 0:
-        print(f"  ✅ Fixed {flipped} inward-facing faces before export", flush=True)
+        # Per-shell signed-volume normals correction.
+        # This MUST run after triangulation (so all faces are tris for accurate
+        # volume computation) and before export (so the OBJ has correct normals).
+        print("Running final per-shell normals fix...")
+        flipped = fix_normals_per_shell(model)
+        if flipped > 0:
+            print(f"  ✅ Fixed {flipped} inward-facing faces before export", flush=True)
+    else:
+        print("⚡ SKIP_REPAIR mode: skipping UV outlier fix, triangulation and normals fix "
+              "(original model faces & normals left 100% untouched)", flush=True)
 
     # ====================== EXPORT ======================
     # Apply all transforms one final time
