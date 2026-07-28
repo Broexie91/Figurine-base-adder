@@ -15,7 +15,7 @@ app = FastAPI(title="GLB Figurine Base Adder")
 def test_blender():
     try:
         cmd = ["blender", "-b", "--python", "/app/blender_process.py", "--",
-               "test_input.glb", "test_output.obj", "10", "true", "false"]
+               "test_input.glb", "test_output.obj", "10", "true", "false", "false"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return {
             "returncode": result.returncode,
@@ -34,9 +34,9 @@ class BaseRequest(BaseModel):
     add_keychain: bool = False
 
 
-async def _process_model(request: BaseRequest, skip_repair: bool = False):
+async def _process_model(request: BaseRequest, skip_repair: bool = False, aggressive: bool = False):
     """
-    Shared logic for both /add-base and /add-base-raw endpoints.
+    Shared logic for /add-base, /add-base-raw and /add-base-tripo endpoints.
     Downloads the GLB, runs Blender, and returns a ZIP response.
     """
     # Validatie van de input
@@ -62,13 +62,15 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False):
             f.write(content)
 
         print(f"Input file downloaded for order {request.order_nr}, size: {len(content)} bytes")
+        print(f"Flags → skip_repair={skip_repair}, aggressive={aggressive}")
         
         # 2. Blender aanroepen met XVFB (headless display)
+        # Arguments: input, output, size_cm, add_base, add_keychain, skip_repair, aggressive
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
             str(input_glb), str(output_obj), str(request.size_cm),
-            str(request.add_base), str(request.add_keychain), str(skip_repair)
+            str(request.add_base), str(request.add_keychain), str(skip_repair), str(aggressive)
         ]
 
         try:
@@ -129,7 +131,7 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False):
 @app.post("/add-base")
 async def add_base(request: BaseRequest):
     """Process GLB model with full mesh repair pipeline."""
-    return await _process_model(request, skip_repair=False)
+    return await _process_model(request, skip_repair=False, aggressive=False)
 
 
 @app.post("/add-base-raw")
@@ -139,4 +141,20 @@ async def add_base_raw(request: BaseRequest):
     Only does: import, scale, base/text/keychain, texture export, OBJ export.
     Lets Marketiger handle all mesh fixing and hole repair.
     """
-    return await _process_model(request, skip_repair=True)
+    return await _process_model(request, skip_repair=True, aggressive=False)
+
+
+@app.post("/add-base-tripo")
+async def add_base_tripo(request: BaseRequest):
+    """
+    Aggressive repair pipeline optimized for Tripo AI models.
+
+    - Stronger non-manifold / zero-face / interior-face / shell cleanup
+    - Better UV protection (stricter outlier detection) to prevent vlekken/strepen
+    - Safety guards: never deletes feet or large geometry drops
+    - Same base generation + texture preservation as /add-base
+
+    Use this when the standard /add-base leaves too many non-manifold edges,
+    interior faces or texture artefacts on Tripo-generated models.
+    """
+    return await _process_model(request, skip_repair=False, aggressive=True)
