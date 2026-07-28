@@ -278,7 +278,7 @@ def deep_repair(obj, max_iterations=3):
             bpy.ops.mesh.fill()
         except RuntimeError:
             pass
-        bpy.ops.mesh.remove_doubles(threshold=0.03)  # milder than 0.05 to protect UVs
+        bpy.ops.mesh.remove_doubles(threshold=0.03)
         bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.mesh.normals_make_consistent(inside=False)
         bpy.ops.mesh.fill_holes(sides=0)
@@ -765,16 +765,23 @@ try:
     bpy.ops.object.transform_apply(scale=True)
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
-    # EARLY CLEANUP — much milder to protect UVs
+    # EARLY CLEANUP — only when the mesh is extremely broken.
+    # Running dissolve/remove_doubles + holes_fill on a reasonably clean mesh
+    # destroys UV continuity and creates the white/grey spots in hair/skin.
     if aggressive and not skip_repair:
-        print("🔥 Early mild cleanup (zero-faces / degenerates)...", flush=True)
-        verts_b, height_b = safety_snapshot(model)
-        repair_mesh(model, merge_threshold=0.02)  # was 0.05 — too destructive for UVs
-        open_e, _ = check_manifold(model)
-        if open_e > 15000:  # only escalate on extreme cases
-            print("  Still extremely many open edges → second pass at 0.05 mm", flush=True)
-            repair_mesh(model, merge_threshold=0.05)
-        check_safety(model, verts_b, height_b, "early_cleanup")
+        open_e_early, _ = check_manifold(model)
+        print(f"  Open edges after scale: {open_e_early}", flush=True)
+        if open_e_early > 5000:
+            print("🔥 Early mild cleanup (open edges > 5000)...", flush=True)
+            verts_b, height_b = safety_snapshot(model)
+            repair_mesh(model, merge_threshold=0.015)
+            open_e, _ = check_manifold(model)
+            if open_e > 10000:
+                print("  Still extremely many open edges → second pass at 0.03 mm", flush=True)
+                repair_mesh(model, merge_threshold=0.03)
+            check_safety(model, verts_b, height_b, "early_cleanup")
+        else:
+            print(f"  Skipping early cleanup (only {open_e_early} open edges — preserving UVs)", flush=True)
 
     # DECIMATION
     if not skip_repair:
@@ -811,10 +818,9 @@ try:
         open_e, non_m = check_manifold(model)
         print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-        # Only escalate merge distance when open edges are still high
         if open_e > 300:
             print("  ⚠️ Still many open edges, trying mild merge at 0.03mm...", flush=True)
-            repair_mesh(model, merge_threshold=0.03)  # was 0.05 — less UV damage
+            repair_mesh(model, merge_threshold=0.03)
             open_e, non_m = check_manifold(model)
             print(f"  Post-mild-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
@@ -952,7 +958,7 @@ try:
     if not skip_repair:
         open_e, non_m = check_manifold(model)
         print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
-        threshold = 80 if aggressive else 200  # slightly more lenient than 50
+        threshold = 80 if aggressive else 200
         if open_e > threshold:
             print(f"⚠️  {open_e} open edges exceeds threshold ({threshold}). Escalating repair...", flush=True)
             repair_mesh(model, merge_threshold=0.03)
@@ -985,7 +991,6 @@ try:
 
     # UV OUTLIER + TRIANGULATE + NORMALS
     if not skip_repair:
-        # Key change: milder UV threshold (0.12 instead of 0.08)
         uv_threshold = 0.12 if aggressive else 0.15
 
         print("Running UV outlier detection...")
@@ -1001,7 +1006,6 @@ try:
         bpy.ops.object.modifier_apply(modifier=mod.name)
         print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
 
-        # Second UV pass only if the first one found a meaningful number of outliers
         if aggressive and fixed_count > 150:
             print(f"🔥 Second UV outlier pass (first pass fixed {fixed_count})...", flush=True)
             fix_uv_outliers(model, uv_dist_threshold=uv_threshold)
