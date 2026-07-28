@@ -176,8 +176,8 @@ def repair_mesh(obj, merge_threshold=0.01, interpolate_uvs=True):
     Robust mesh repair using bmesh.ops.
 
     interpolate_uvs=True  → average UVs from all neighboring faces (normal path)
-    interpolate_uvs=False → copy UV from a *single* neighboring loop per vertex
-                            (safe for early cleanup — avoids UV-island blending)
+    interpolate_uvs=False → copy UV from the spatially closest neighboring face
+                            (safe for early cleanup — follows geometry, not UV islands)
     """
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -223,18 +223,44 @@ def repair_mesh(obj, merge_threshold=0.01, interpolate_uvs=True):
                             fixed_loops += 1
                 print(f"  🎨 Interpolated UVs for {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
             else:
-                # Safe path for early cleanup: take the UV from the *first*
-                # existing neighboring loop only. This stays inside one UV island
-                # and prevents the light/grey spots.
+                # Safe path: for each new face, find the existing neighboring face
+                # whose center is closest in 3D space, then copy UVs from that face.
+                # This follows the geometric surface (hairline, skin, etc.) instead of
+                # a random UV-island order.
                 for face in new_faces:
+                    face_center = face.calc_center_median()
+                    best_dist = float('inf')
+                    best_uvs = None  # list of (vert, uv) from the closest face
+
+                    # Collect candidate neighbor faces via the vertices of this new face
+                    candidates = {}
                     for loop in face.loops:
-                        vert = loop.vert
-                        for other_loop in vert.link_loops:
-                            if other_loop.face not in new_face_set:
-                                loop[uv_layer].uv = other_loop[uv_layer].uv.copy()
-                                fixed_loops += 1
-                                break
-                print(f"  🎨 Safe single-neighbor UV assigned to {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
+                        for other_loop in loop.vert.link_loops:
+                            other_face = other_loop.face
+                            if other_face in new_face_set:
+                                continue
+                            if other_face.index not in candidates:
+                                candidates[other_face.index] = other_face
+
+                    for of in candidates.values():
+                        d = (of.calc_center_median() - face_center).length_squared
+                        if d < best_dist:
+                            best_dist = d
+                            # Build a vert→uv map from this closest face
+                            best_uvs = {}
+                            for ol in of.loops:
+                                best_uvs[ol.vert.index] = ol[uv_layer].uv.copy()
+
+                    if best_uvs is not None:
+                        for loop in face.loops:
+                            vi = loop.vert.index
+                            if vi in best_uvs:
+                                loop[uv_layer].uv = best_uvs[vi]
+                            else:
+                                # Fallback: any UV from the closest face
+                                loop[uv_layer].uv = next(iter(best_uvs.values()))
+                            fixed_loops += 1
+                print(f"  🎨 Closest-face UV assigned to {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
     except (TypeError, AttributeError):
         bm.to_mesh(obj.data)
         bm.free()
@@ -790,12 +816,12 @@ try:
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
     # EARLY CLEANUP — only when the mesh is extremely broken.
-    # Uses safe single-neighbor UV assignment (no averaging across UV islands).
+    # Uses closest-face UV assignment (follows geometry, not UV-island order).
     if aggressive and not skip_repair:
         open_e_early, _ = check_manifold(model)
         print(f"  Open edges after scale: {open_e_early}", flush=True)
         if open_e_early > 5000:
-            print("🔥 Early mild cleanup (open edges > 5000, safe single-neighbor UVs)...", flush=True)
+            print("🔥 Early mild cleanup (open edges > 5000, closest-face UVs)...", flush=True)
             verts_b, height_b = safety_snapshot(model)
             repair_mesh(model, merge_threshold=0.015, interpolate_uvs=False)
             open_e, _ = check_manifold(model)
