@@ -171,7 +171,15 @@ def check_safety(obj, verts_before, height_before, label="step"):
     return True
 
 
-def repair_mesh(obj, merge_threshold=0.01):
+def repair_mesh(obj, merge_threshold=0.01, interpolate_uvs=True):
+    """
+    Robust mesh repair using bmesh.ops.
+
+    interpolate_uvs: when False (used in early cleanup), new faces from
+    holes_fill keep their default UVs instead of being interpolated.
+    This prevents the white/grey texture spots that appear when averaging
+    UVs across UV-island boundaries on dense Tripo meshes.
+    """
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bm.verts.ensure_lookup_table()
@@ -195,7 +203,8 @@ def repair_mesh(obj, merge_threshold=0.01):
         result = bmesh.ops.holes_fill(bm, edges=bm.edges[:], sides=0)
         new_faces = result.get('faces', [])
         stats['holes_filled'] = len(new_faces)
-        if uv_layer and new_faces:
+
+        if uv_layer and new_faces and interpolate_uvs:
             new_face_set = set(new_faces)
             fixed_loops = 0
             for face in new_faces:
@@ -211,6 +220,8 @@ def repair_mesh(obj, merge_threshold=0.01):
                         loop[uv_layer].uv = (avg_u, avg_v)
                         fixed_loops += 1
             print(f"  🎨 Interpolated UVs for {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
+        elif new_faces and not interpolate_uvs:
+            print(f"  ⚡ Skipped UV interpolation on {len(new_faces)} hole-filled faces (early cleanup — UV-safe)", flush=True)
     except (TypeError, AttributeError):
         bm.to_mesh(obj.data)
         bm.free()
@@ -766,19 +777,18 @@ try:
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
     # EARLY CLEANUP — only when the mesh is extremely broken.
-    # Running dissolve/remove_doubles + holes_fill on a reasonably clean mesh
-    # destroys UV continuity and creates the white/grey spots in hair/skin.
+    # UV interpolation is DISABLED here to prevent texture spots.
     if aggressive and not skip_repair:
         open_e_early, _ = check_manifold(model)
         print(f"  Open edges after scale: {open_e_early}", flush=True)
         if open_e_early > 5000:
-            print("🔥 Early mild cleanup (open edges > 5000)...", flush=True)
+            print("🔥 Early mild cleanup (open edges > 5000, no UV interpolation)...", flush=True)
             verts_b, height_b = safety_snapshot(model)
-            repair_mesh(model, merge_threshold=0.015)
+            repair_mesh(model, merge_threshold=0.015, interpolate_uvs=False)
             open_e, _ = check_manifold(model)
             if open_e > 10000:
                 print("  Still extremely many open edges → second pass at 0.03 mm", flush=True)
-                repair_mesh(model, merge_threshold=0.03)
+                repair_mesh(model, merge_threshold=0.03, interpolate_uvs=False)
             check_safety(model, verts_b, height_b, "early_cleanup")
         else:
             print(f"  Skipping early cleanup (only {open_e_early} open edges — preserving UVs)", flush=True)
@@ -813,7 +823,7 @@ try:
             if not check_safety(model, verts_b, height_b, "ghost_shells_early"):
                 print("  ⚠️ Ghost shell removal was too aggressive — continuing with remaining geometry", flush=True)
 
-        repair_mesh(model, merge_threshold=0.01)
+        repair_mesh(model, merge_threshold=0.01)  # normal path keeps UV interpolation
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
