@@ -175,10 +175,9 @@ def repair_mesh(obj, merge_threshold=0.01, interpolate_uvs=True):
     """
     Robust mesh repair using bmesh.ops.
 
-    interpolate_uvs: when False (used in early cleanup), new faces from
-    holes_fill keep their default UVs instead of being interpolated.
-    This prevents the white/grey texture spots that appear when averaging
-    UVs across UV-island boundaries on dense Tripo meshes.
+    interpolate_uvs=True  → average UVs from all neighboring faces (normal path)
+    interpolate_uvs=False → copy UV from a *single* neighboring loop per vertex
+                            (safe for early cleanup — avoids UV-island blending)
     """
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -204,24 +203,38 @@ def repair_mesh(obj, merge_threshold=0.01, interpolate_uvs=True):
         new_faces = result.get('faces', [])
         stats['holes_filled'] = len(new_faces)
 
-        if uv_layer and new_faces and interpolate_uvs:
+        if uv_layer and new_faces:
             new_face_set = set(new_faces)
             fixed_loops = 0
-            for face in new_faces:
-                for loop in face.loops:
-                    vert = loop.vert
-                    neighbor_uvs = []
-                    for other_loop in vert.link_loops:
-                        if other_loop.face not in new_face_set:
-                            neighbor_uvs.append(other_loop[uv_layer].uv.copy())
-                    if neighbor_uvs:
-                        avg_u = sum(uv.x for uv in neighbor_uvs) / len(neighbor_uvs)
-                        avg_v = sum(uv.y for uv in neighbor_uvs) / len(neighbor_uvs)
-                        loop[uv_layer].uv = (avg_u, avg_v)
-                        fixed_loops += 1
-            print(f"  🎨 Interpolated UVs for {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
-        elif new_faces and not interpolate_uvs:
-            print(f"  ⚡ Skipped UV interpolation on {len(new_faces)} hole-filled faces (early cleanup — UV-safe)", flush=True)
+
+            if interpolate_uvs:
+                # Average of all neighbor UVs (normal path)
+                for face in new_faces:
+                    for loop in face.loops:
+                        vert = loop.vert
+                        neighbor_uvs = []
+                        for other_loop in vert.link_loops:
+                            if other_loop.face not in new_face_set:
+                                neighbor_uvs.append(other_loop[uv_layer].uv.copy())
+                        if neighbor_uvs:
+                            avg_u = sum(uv.x for uv in neighbor_uvs) / len(neighbor_uvs)
+                            avg_v = sum(uv.y for uv in neighbor_uvs) / len(neighbor_uvs)
+                            loop[uv_layer].uv = (avg_u, avg_v)
+                            fixed_loops += 1
+                print(f"  🎨 Interpolated UVs for {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
+            else:
+                # Safe path for early cleanup: take the UV from the *first*
+                # existing neighboring loop only. This stays inside one UV island
+                # and prevents the light/grey spots.
+                for face in new_faces:
+                    for loop in face.loops:
+                        vert = loop.vert
+                        for other_loop in vert.link_loops:
+                            if other_loop.face not in new_face_set:
+                                loop[uv_layer].uv = other_loop[uv_layer].uv.copy()
+                                fixed_loops += 1
+                                break
+                print(f"  🎨 Safe single-neighbor UV assigned to {fixed_loops} loops on {len(new_faces)} hole-filled faces", flush=True)
     except (TypeError, AttributeError):
         bm.to_mesh(obj.data)
         bm.free()
@@ -777,12 +790,12 @@ try:
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
     # EARLY CLEANUP — only when the mesh is extremely broken.
-    # UV interpolation is DISABLED here to prevent texture spots.
+    # Uses safe single-neighbor UV assignment (no averaging across UV islands).
     if aggressive and not skip_repair:
         open_e_early, _ = check_manifold(model)
         print(f"  Open edges after scale: {open_e_early}", flush=True)
         if open_e_early > 5000:
-            print("🔥 Early mild cleanup (open edges > 5000, no UV interpolation)...", flush=True)
+            print("🔥 Early mild cleanup (open edges > 5000, safe single-neighbor UVs)...", flush=True)
             verts_b, height_b = safety_snapshot(model)
             repair_mesh(model, merge_threshold=0.015, interpolate_uvs=False)
             open_e, _ = check_manifold(model)
@@ -1001,7 +1014,6 @@ try:
 
     # UV OUTLIER + TRIANGULATE + NORMALS
     if not skip_repair:
-        # Stricter threshold for aggressive mode to catch default-UV faces from early cleanup
         uv_threshold = 0.10 if aggressive else 0.15
 
         print("Running UV outlier detection...")
@@ -1017,7 +1029,6 @@ try:
         bpy.ops.object.modifier_apply(modifier=mod.name)
         print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
 
-        # Always run a second UV pass in aggressive mode (catches remaining default-UV faces)
         if aggressive:
             print(f"🔥 Second UV outlier pass after triangulation (threshold={uv_threshold})...", flush=True)
             fix_uv_outliers(model, uv_dist_threshold=uv_threshold)
