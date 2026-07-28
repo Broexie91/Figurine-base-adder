@@ -823,7 +823,7 @@ try:
             if not check_safety(model, verts_b, height_b, "ghost_shells_early"):
                 print("  ⚠️ Ghost shell removal was too aggressive — continuing with remaining geometry", flush=True)
 
-        repair_mesh(model, merge_threshold=0.01)  # normal path keeps UV interpolation
+        repair_mesh(model, merge_threshold=0.01)
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -1001,7 +1001,8 @@ try:
 
     # UV OUTLIER + TRIANGULATE + NORMALS
     if not skip_repair:
-        uv_threshold = 0.12 if aggressive else 0.15
+        # Stricter threshold for aggressive mode to catch default-UV faces from early cleanup
+        uv_threshold = 0.10 if aggressive else 0.15
 
         print("Running UV outlier detection...")
         fixed_count = fix_uv_outliers(model, uv_dist_threshold=uv_threshold)
@@ -1016,11 +1017,10 @@ try:
         bpy.ops.object.modifier_apply(modifier=mod.name)
         print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
 
-        if aggressive and fixed_count > 150:
-            print(f"🔥 Second UV outlier pass (first pass fixed {fixed_count})...", flush=True)
+        # Always run a second UV pass in aggressive mode (catches remaining default-UV faces)
+        if aggressive:
+            print(f"🔥 Second UV outlier pass after triangulation (threshold={uv_threshold})...", flush=True)
             fix_uv_outliers(model, uv_dist_threshold=uv_threshold)
-        elif aggressive:
-            print(f"  Skipping second UV pass (only {fixed_count} outliers in first pass)", flush=True)
 
         print("Running final per-shell normals fix...")
         flipped = fix_normals_per_shell(model)
