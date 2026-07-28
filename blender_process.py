@@ -237,6 +237,31 @@ def check_manifold(obj):
     return len(open_edges), len(non_manifold_verts)
 
 
+def safety_snapshot(obj):
+    """Return (vert_count, height_mm) for safety checks."""
+    bmin, bmax = get_bounds([obj])
+    return len(obj.data.vertices), (bmax.z - bmin.z)
+
+
+def check_safety(obj, verts_before, height_before, label="step"):
+    """
+    Abort a destructive step if too much geometry was lost.
+    Returns True if the step is considered safe, False otherwise.
+    """
+    verts_after, height_after = safety_snapshot(obj)
+    vert_ratio = verts_after / max(verts_before, 1)
+    height_ratio = height_after / max(height_before, 1e-6)
+
+    if vert_ratio < 0.92 or height_ratio < 0.97:
+        print(f"  🚨 SAFETY ABORT after {label}: "
+              f"verts {verts_before}→{verts_after} ({vert_ratio:.1%}), "
+              f"height {height_before:.1f}→{height_after:.1f}mm ({height_ratio:.1%})", flush=True)
+        return False
+
+    print(f"  ✅ Safety OK after {label}: verts={verts_after}, height={height_after:.1f}mm", flush=True)
+    return True
+
+
 def repair_mesh(obj, merge_threshold=0.01):
     """
     Robust mesh repair using bmesh.ops (context-independent, works headlessly).
@@ -449,6 +474,35 @@ def deep_repair(obj, max_iterations=3):
         open_e = open_e_after
 
 
+def remove_interior_faces_safe(obj):
+    """
+    Extra interior-face cleanup that is safer than the basic deep_repair check.
+    Only deletes faces where ALL edges have >2 face users.
+    Logs the count and is intended to be called after boolean operations.
+    """
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+
+    interior_faces = []
+    for f in bm.faces:
+        if all(len(e.link_faces) > 2 for e in f.edges):
+            interior_faces.append(f)
+
+    count = len(interior_faces)
+    if count > 0:
+        bmesh.ops.delete(bm, geom=interior_faces, context='FACES')
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        print(f"  🗑️ remove_interior_faces_safe: deleted {count} interior faces", flush=True)
+    else:
+        print("  ✅ remove_interior_faces_safe: no interior faces found", flush=True)
+
+    bm.free()
+    return count
+
+
 def fix_normals_per_shell(obj):
     """
     Fix normals per disconnected shell using signed-volume analysis.
@@ -581,24 +635,10 @@ def remove_ghost_shells(obj, min_faces=50):
     Remove tiny disconnected shells ("ghost shells") that cause
     Marketiger upload failures.
 
-    Meshy AI models often contain 1-8 triangle fragments floating inside
-    the mesh. Marketiger's processing usually auto-removes these, but
-    sometimes fails.
-
     Strategy:
       - Always keep the largest shell (main figurine body).
       - Remove any other shell with fewer than min_faces faces.
       - Log every decision for transparency.
-
-    Args:
-        obj: Blender mesh object.
-        min_faces: Shells with fewer faces than this are removed.
-                   Default 50 — conservative enough to preserve legitimate
-                   accessories (glasses, earrings ≥ 100 faces) while catching
-                   ghost shells (typically 1-8 faces).
-
-    Returns:
-        Number of shells removed.
     """
     print(f"Removing ghost shells (threshold: {min_faces} faces)...", flush=True)
 
@@ -676,15 +716,104 @@ def remove_ghost_shells(obj, min_faces=50):
     return removed_count
 
 
+def remove_ghost_shells_safe(obj, min_faces=12, bottom_protect_ratio=0.18):
+    """
+    Safer ghost-shell removal used in aggressive/Tripo mode.
+
+    Guarantees:
+      - Always keeps the largest shell
+      - Always keeps any shell that intersects the bottom X% of the model
+        (protects feet / shoes even if they are separate shells)
+      - Only removes small floating fragments above the protection zone
+    """
+    print(f"Removing ghost shells SAFE (min_faces={min_faces}, "
+          f"bottom_protect={bottom_protect_ratio:.0%})...", flush=True)
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+
+    # World-space bounds for protection zone
+    bmin, bmax = get_bounds([obj])
+    protect_z = bmin.z + (bmax.z - bmin.z) * bottom_protect_ratio
+
+    # Find shells
+    visited = set()
+    shells = []
+    for face in bm.faces:
+        if face.index in visited:
+            continue
+        shell = []
+        queue = [face]
+        while queue:
+            f = queue.pop()
+            if f.index in visited:
+                continue
+            visited.add(f.index)
+            shell.append(f)
+            for edge in f.edges:
+                for linked_face in edge.link_faces:
+                    if linked_face.index not in visited:
+                        queue.append(linked_face)
+        shells.append(shell)
+
+    print(f"  Found {len(shells)} shell(s)", flush=True)
+
+    if len(shells) <= 1:
+        bm.free()
+        print("  ✅ Single shell — nothing to remove.", flush=True)
+        return 0
+
+    shells.sort(key=lambda s: len(s), reverse=True)
+
+    faces_to_delete = []
+    removed_count = 0
+    removed_faces_total = 0
+    kept_count = 0
+    kept_faces_total = 0
+
+    for i, shell in enumerate(shells):
+        n_faces = len(shell)
+
+        # Compute lowest Z of this shell (world space approximation via face centers)
+        shell_min_z = min(f.calc_center_median().z for f in shell)
+
+        protect = False
+        if i == 0:
+            protect = True  # largest shell always kept
+        elif shell_min_z <= protect_z:
+            protect = True  # intersects feet protection zone
+            print(f"  🛡️ Protecting shell with {n_faces} faces (min_z={shell_min_z:.1f} ≤ {protect_z:.1f})", flush=True)
+        elif n_faces >= min_faces:
+            protect = True
+
+        if protect:
+            kept_count += 1
+            kept_faces_total += n_faces
+        else:
+            faces_to_delete.extend(shell)
+            removed_count += 1
+            removed_faces_total += n_faces
+
+    if faces_to_delete:
+        bmesh.ops.delete(bm, geom=faces_to_delete, context='FACES')
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        print(f"  🗑️ Removed {removed_count} ghost shell(s) ({removed_faces_total} faces), "
+              f"kept {kept_count} shell(s) ({kept_faces_total} faces)", flush=True)
+    else:
+        print(f"  ✅ No removable ghost shells (all protected or large enough).", flush=True)
+
+    bm.free()
+    return removed_count
+
+
 def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
     """
     After a boolean union, ONLY fix faces whose UVs are missing or out-of-range.
     Uses numpy foreach_get/foreach_set to avoid slow Python loops over all loops.
-
-    Note: uv_coord (0.008, 0.008) = bottom-left of UV space.
-    Blender UV Y=0 is the bottom; PIL Y=0 is the top, so this maps to
-    PIL pixel (16, height-16) on a 2048px texture — inside the 32x32
-    grey patch painted at the bottom of the PIL image.
     """
     import numpy as np
     mesh = obj.data
@@ -719,18 +848,6 @@ def pin_new_face_uvs(obj, uv_coord=(0.008, 0.008)):
 def pin_base_face_uvs(obj, base_top_z, uv_coord=(0.008, 0.008)):
     """
     Force all faces in the base region to use the grey sentinel UV.
-
-    After a boolean union, seam faces between the figurine and base get
-    interpolated UVs from the figurine texture (skin, clothing, etc.).
-    These UVs are valid (within 0-1) so pin_new_face_uvs doesn't catch them.
-
-    This function identifies base faces by their Z position: any face whose
-    centre is at or below base_top_z is pinned to the grey sentinel patch.
-
-    Args:
-        obj: The merged model object (after boolean union).
-        base_top_z: The Z coordinate of the base's top surface.
-        uv_coord: UV coordinate for the grey sentinel patch.
     """
     mesh = obj.data
     uv_layer = mesh.uv_layers.active
@@ -759,23 +876,6 @@ def pin_base_face_uvs(obj, base_top_z, uv_coord=(0.008, 0.008)):
 def fix_uv_outliers(obj, uv_dist_threshold=0.15):
     """
     Detect and fix isolated faces with outlier UV coordinates.
-
-    After mesh operations (remove_doubles, dissolve_degenerate, boolean),
-    some faces end up with UV coordinates pointing to a completely wrong
-    part of the texture atlas. These appear as coloured spots/streaks
-    (e.g. skin-colour blotches on a white dress).
-
-    Detection: a face is an outlier if its UV centroid differs from ALL
-    its vertex-adjacent neighbours by more than uv_dist_threshold in UV
-    space. Legitimate UV-island boundaries are safe because a face always
-    has at least one neighbour on the same island.
-
-    Fix: replace the outlier face's UVs with values interpolated from its
-    closest neighbour (using shared-vertex UVs where possible).
-
-    Optimised with numpy foreach_get/foreach_set for bulk data access,
-    vertex-face adjacency (instead of edge-face), and squared-distance
-    early-break to handle 300K+ face meshes within seconds.
     """
     import numpy as np
 
@@ -791,7 +891,7 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
     if n_polys == 0:
         return 0
 
-    print(f"  Scanning {n_polys} faces for UV outliers...", flush=True)
+    print(f"  Scanning {n_polys} faces for UV outliers (threshold={uv_dist_threshold})...", flush=True)
 
     # --- Bulk data extraction via fast C-level calls ---
     uv_data = np.empty(n_loops * 2, dtype=np.float64)
@@ -806,7 +906,7 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
     vert_indices = np.empty(n_loops, dtype=np.int32)
     mesh.loops.foreach_get("vertex_index", vert_indices)
 
-    # --- UV centroid per face (vectorised for tri meshes, loop fallback) ---
+    # --- UV centroid per face ---
     uv_centroids = np.zeros((n_polys, 2), dtype=np.float64)
     if np.all(loop_totals == 3):
         uv_centroids = uv_data.reshape(n_polys, 3, 2).mean(axis=1)
@@ -819,7 +919,7 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
             t = int(loop_totals[i])
             uv_centroids[i] = uv_data[s:s+t].mean(axis=0)
 
-    # --- Vertex → face adjacency (list-of-lists, fast to build) ---
+    # --- Vertex → face adjacency ---
     vert_to_faces = [[] for _ in range(n_verts)]
     for i in range(n_polys):
         s = int(loop_starts[i])
@@ -827,9 +927,9 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
         for j in range(s, s + t):
             vert_to_faces[vert_indices[j]].append(i)
 
-    # --- Find outlier faces (squared-distance + early break) ---
+    # --- Find outlier faces ---
     threshold_sq = uv_dist_threshold * uv_dist_threshold
-    outliers = []  # (face_index, closest_neighbour_index)
+    outliers = []
 
     for i in range(n_polys):
         cx, cy = uv_centroids[i]
@@ -870,7 +970,6 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
         ns = int(loop_starts[neighbor_idx])
         nt = int(loop_totals[neighbor_idx])
 
-        # Build vertex → UV map for the neighbour
         n_vert_uvs = {}
         for j in range(ns, ns + nt):
             n_vert_uvs[int(vert_indices[j])] = uv_data[j].copy()
@@ -880,11 +979,10 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
         for j in range(s, s + t):
             vi = int(vert_indices[j])
             if vi in n_vert_uvs:
-                uv_data[j] = n_vert_uvs[vi]      # shared vertex → exact UV
+                uv_data[j] = n_vert_uvs[vi]
             else:
-                uv_data[j] = n_centroid           # fallback → centroid
+                uv_data[j] = n_centroid
 
-    # --- Write all UVs back in one C-level call ---
     uv_layer.data.foreach_set("uv", uv_data.ravel())
 
     print(f"  🎨 Fixed {len(outliers)} UV outlier faces out of {n_polys} "
@@ -895,15 +993,9 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
 def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normals=True):
     """
     Hardened Boolean union cascade:
-      1. FLOAT solver  (fast, local intersection only — preferred for AI meshes)
-      2. EXACT solver  (more robust when tool is a clean primitive like cylinder)
-      3. JOIN + weld   (last resort — merges objects and welds the seam)
-
-    After each boolean attempt, verifies the result with a manifold check.
-    Returns True if a real boolean succeeded, False if JOIN was used.
-
-    fix_normals: when False (raw/skip_repair mode) the original face normals
-                 of the figurine are left completely untouched.
+      1. FLOAT solver
+      2. EXACT solver
+      3. JOIN + weld
     """
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
@@ -922,12 +1014,10 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normal
             bpy.ops.object.modifier_apply(modifier=mod.name)
             new_verts = len(target_obj.data.vertices)
 
-            # If solver silent-fails, vertex count stays the same
             success = new_verts != vert_before
             print(f"  [{solver_name}] verts before={vert_before}, after={new_verts} → {'✅ success' if success else '❌ silent failure'}")
 
             if success and fix_normals:
-                # Verify the result: recalculate normals on the combined mesh
                 bm = bmesh.new()
                 bm.from_mesh(target_obj.data)
                 bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
@@ -940,29 +1030,20 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normal
             return success
         except Exception as e:
             print(f"  [{solver_name}] threw error: {e}")
-            # Clean up the failed modifier if it still exists
             mod_check = target_obj.modifiers.get(f"{modifier_name}_{solver_name}")
             if mod_check:
                 target_obj.modifiers.remove(mod_check)
             return False
 
-    # --- Attempt 1: FLOAT (BMesh) ---
-    # FLOAT only evaluates the local intersection, preserving the rest of the
-    # figurine's (often non-manifold) geometry intact.
     if _try_solver('FLOAT'):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
 
-    # --- Attempt 2: EXACT ---
-    # EXACT is more robust when the tool object is a clean manifold primitive
-    # (cylinder base, torus). It may shred the figurine's self-intersections,
-    # but for clean primitives it often works where FLOAT fails.
     print(f"  ⚠️ FLOAT failed, trying EXACT for {modifier_name}...")
     if _try_solver('EXACT'):
         bpy.data.objects.remove(tool_obj, do_unlink=True)
         return True
 
-    # --- Attempt 3: JOIN + weld seam ---
     print(f"🚨 All boolean solvers failed for {modifier_name}. Falling back to JOIN + weld...")
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
@@ -970,7 +1051,6 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normal
     bpy.context.view_layer.objects.active = target_obj
     bpy.ops.object.join()
 
-    # Weld the seam: merge overlapping vertices where the objects meet
     bm = bmesh.new()
     bm.from_mesh(target_obj.data)
     bm.verts.ensure_lookup_table()
@@ -979,7 +1059,6 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normal
     bm.verts.ensure_lookup_table()
     welded = before_verts - len(bm.verts)
 
-    # Recalculate normals after join (only if allowed)
     if fix_normals:
         bm.faces.ensure_lookup_table()
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
@@ -1006,11 +1085,15 @@ try:
     add_base       = argv[3].lower() == 'true' if len(argv) > 3 else True
     add_keychain   = argv[4].lower() == 'true' if len(argv) > 4 else False
     skip_repair    = argv[5].lower() == 'true' if len(argv) > 5 else False
+    aggressive     = argv[6].lower() == 'true' if len(argv) > 6 else False
 
     desired_height_mm = size_cm * 10
 
     if skip_repair:
         print("⚡ SKIP_REPAIR mode: all mesh repair/fixing will be skipped", flush=True)
+    if aggressive:
+        print("🔥 AGGRESSIVE / TRIPO mode enabled", flush=True)
+
     base_thickness_mm = 2.5
 
     print("Arguments parsed successfully")
@@ -1044,7 +1127,6 @@ try:
     print(f"Model loaded with {len(model.data.vertices)} vertices", flush=True)
 
     # ====================== SCALE ======================
-    # Scale BEFORE repair so all distance thresholds are in mm
     bmin, bmax = get_bounds([model])
     current_height = bmax.z - bmin.z
     scale_factor = desired_height_mm / current_height
@@ -1052,14 +1134,21 @@ try:
     bpy.ops.object.transform_apply(scale=True)
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
 
+    # ====================== EARLY AGGRESSIVE CLEANUP ======================
+    if aggressive and not skip_repair:
+        print("🔥 Early aggressive cleanup (zero-faces / degenerates)...", flush=True)
+        verts_b, height_b = safety_snapshot(model)
+        repair_mesh(model, merge_threshold=0.05)
+        open_e, _ = check_manifold(model)
+        if open_e > 5000:
+            print("  Still many open edges → second pass at 0.1 mm", flush=True)
+            repair_mesh(model, merge_threshold=0.1)
+        check_safety(model, verts_b, height_b, "early_cleanup")
+
     # ====================== DECIMATION GUARD ======================
-    # AI-generated GLBs can have 500K-1M+ vertices. Every downstream
-    # operation (repair, boolean, normals, triangulate) scales with vert
-    # count, causing timeouts on large models. Cap at ~400K vertices.
-    # Moved inside full repair to avoid damaging fine details in raw mode
     if not skip_repair:
-        MAX_VERTS = 500_000
-        TARGET_VERTS = 400_000
+        MAX_VERTS = 350_000 if aggressive else 500_000
+        TARGET_VERTS = 280_000 if aggressive else 400_000
         vert_count = len(model.data.vertices)
         if vert_count > MAX_VERTS:
             ratio = TARGET_VERTS / vert_count
@@ -1075,23 +1164,35 @@ try:
     else:
         print("⚡ Skipping decimation in SKIP_REPAIR mode (to preserve fine clothing details)", flush=True)
 
-    # ====================== MESH REPAIR (after scaling, thresholds in mm) ======================
+    # ====================== MESH REPAIR ======================
     if not skip_repair:
         print("Running mesh repair (bmesh.ops)...", flush=True)
         open_e_pre, non_m_pre = check_manifold(model)
         print(f"  Pre-repair manifold: open_edges={open_e_pre}, non_manifold_verts={non_m_pre}", flush=True)
 
-        repair_mesh(model, merge_threshold=0.01)  # 0.01mm = 10 microns
+        # Ghost shells early when aggressive (reduces bad UV merges later)
+        if aggressive:
+            verts_b, height_b = safety_snapshot(model)
+            remove_ghost_shells_safe(model, min_faces=12, bottom_protect_ratio=0.18)
+            if not check_safety(model, verts_b, height_b, "ghost_shells_early"):
+                print("  ⚠️ Ghost shell removal was too aggressive — continuing with remaining geometry", flush=True)
+
+        repair_mesh(model, merge_threshold=0.01)
 
         open_e, non_m = check_manifold(model)
         print(f"  Post-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-        # If still many open edges, try a more aggressive merge (0.05mm)
         if open_e > 100:
             print("  ⚠️ Still many open edges, trying aggressive merge at 0.05mm...", flush=True)
             repair_mesh(model, merge_threshold=0.05)
             open_e, non_m = check_manifold(model)
             print(f"  Post-aggressive-repair manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
+        if aggressive and open_e > 50:
+            print("🔥 Running deep_repair with extra iterations...", flush=True)
+            verts_b, height_b = safety_snapshot(model)
+            deep_repair(model, max_iterations=8)
+            check_safety(model, verts_b, height_b, "deep_repair")
     else:
         print("⚡ Skipping mesh repair (skip_repair=true)", flush=True)
 
@@ -1104,12 +1205,10 @@ try:
         foot_verts, foot_bmin_z = get_feet_verts(model, desired_height_mm)
 
         if not foot_verts:
-            # Absolute fallback: no vertices found at all
             foot_verts = [model.matrix_world @ v.co for v in model.data.vertices]
             foot_bmin_z = bmin.z
             print("  ⚠️  No foot vertices found, using all vertices as fallback.", flush=True)
 
-        # Compute centre of mass and project to XY for stability check
         com_world = compute_com(model)
         com_xy    = Vector((com_world.x, com_world.y))
         print(f"  Centre of mass (XY): ({com_xy.x:.1f}, {com_xy.y:.1f})mm", flush=True)
@@ -1123,37 +1222,20 @@ try:
             com_xy        = com_xy,
         )
 
-        # Create a separate grey material for the base.
         gray_mat = bpy.data.materials.new(name="Base_Grey")
         gray_mat.use_nodes = False
-        gray_mat.diffuse_color = (0.627, 0.627, 0.627, 1.0)  # RGB ~#A0A0A0
+        gray_mat.diffuse_color = (0.627, 0.627, 0.627, 1.0)
 
-        # Add grey material to the MODEL before the boolean so it exists as
-        # a material slot that faces can reference after the merge.
         model.data.materials.append(gray_mat)
         gray_mat_index = len(model.data.materials) - 1
-
-        # Also assign it to the base object so Blender knows its material.
         base.data.materials.append(gray_mat)
 
-        # Base needs a UV layer for Blender internals (boolean ops expect it),
-        # but the UVs don't matter since the grey material has no texture.
         if model.data.uv_layers.active:
             base.data.uv_layers.new(name=model.data.uv_layers.active.name)
 
-        # Union base into model
-        # In raw/skip_repair mode we deliberately leave all original face normals untouched
         robust_boolean_union(model, base, "Base_Union", fix_normals=not skip_repair)
 
-        # Fix material assignment for base faces.
-        # The FLOAT boolean solver does NOT transfer material indices from
-        # the tool object — all faces get material_index=0 (figurine texture).
-        # Fix by identifying base faces via Z-position and assigning the grey
-        # material. Using foot_bmin_z as threshold is safe: no figurine geometry
-        # exists below the figurine's lowest vertex, so only actual base faces
-        # are caught (unlike the old UV-pinning approach which used base_top_z
-        # and accidentally caught figurine feet).
-        base_top_z = foot_bmin_z + 0.5  # matches top_z in build_convex_base
+        base_top_z = foot_bmin_z + 0.5
         base_faces_fixed = 0
         for poly in model.data.polygons:
             if poly.center.z <= base_top_z:
@@ -1163,20 +1245,22 @@ try:
         print(f"  🎨 Assigned Base_Grey material to {base_faces_fixed} base faces "
               f"(Z ≤ {base_top_z:.2f}mm, material_index={gray_mat_index})", flush=True)
 
-        # Fix any out-of-range UVs created by the boolean operation
         print("Pinning out-of-range UVs after base union...")
         pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
 
-        # Pin UVs on all base/seam faces to the grey sentinel patch.
-        # The boolean solver interpolates UVs on seam faces, causing them
-        # to sample random parts of the figurine texture (spots/streaks).
         print("Pinning base region UVs to grey sentinel...")
         pin_base_face_uvs(model, base_top_z=base_top_z, uv_coord=(0.008, 0.008))
 
-        # Post-boolean repair on unified mesh
+        # Post-boolean repair + interior-face cleanup
         if not skip_repair:
             print("Running post-boolean repair...")
             repair_mesh(model, merge_threshold=0.01)
+
+            if aggressive:
+                print("🔥 Extra interior-face cleanup after boolean...", flush=True)
+                verts_b, height_b = safety_snapshot(model)
+                remove_interior_faces_safe(model)
+                check_safety(model, verts_b, height_b, "post_boolean_interior")
 
             open_e, non_m = check_manifold(model)
             print(f"  Post-base manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
@@ -1244,20 +1328,15 @@ try:
 
         robust_boolean_union(model, torus, "Keychain_Union", fix_normals=not skip_repair)
 
-        # Repair UVs: pin only boolean-generated faces with out-of-range UVs.
         print("Pinning out-of-range UVs after keychain union...")
         pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
 
-        # Post-boolean repair
         if not skip_repair:
             repair_mesh(model, merge_threshold=0.01)
-
             open_e, non_m = check_manifold(model)
             print(f"  Post-keychain manifold: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # ====================== TEXTURE EXPORT ======================
-    # Extract the embedded texture from the GLB and save as PNG.
-    # No sentinel pixel patching needed — the base has its own grey material.
     out_dir = os.path.dirname(output_path)
     texture_path = os.path.join(out_dir, "model.png")
     found_texture = False
@@ -1287,59 +1366,50 @@ try:
         open_e, non_m = check_manifold(model)
         print(f"FINAL manifold check: open_edges={open_e}, non_manifold_verts={non_m}")
 
-        if open_e > 200:
-            print(f"⚠️  {open_e} open edges exceeds threshold (200). Escalating repair...", flush=True)
+        threshold = 50 if aggressive else 200
 
-            # Escalation 1: aggressive merge + fill (0.05mm)
+        if open_e > threshold:
+            print(f"⚠️  {open_e} open edges exceeds threshold ({threshold}). Escalating repair...", flush=True)
+
             repair_mesh(model, merge_threshold=0.05)
             open_e, non_m = check_manifold(model)
             print(f"  After aggressive repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
-            if open_e > 200:
-                # Escalation 2: deep repair — handles wire edges, interior faces,
-                # and uses bpy.ops select_non_manifold + fill iteratively
+            if open_e > threshold:
                 print("  ⚠️ Still non-manifold. Running deep_repair...", flush=True)
-                deep_repair(model, max_iterations=5)
+                verts_b, height_b = safety_snapshot(model)
+                deep_repair(model, max_iterations=8 if aggressive else 5)
+                check_safety(model, verts_b, height_b, "final_deep_repair")
                 open_e, non_m = check_manifold(model)
                 print(f"  After deep_repair: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
-        elif open_e > 0:
-            print(f"  ℹ️  {open_e} open edges ≤ 200 — skipping aggressive repair (Marketiger auto-heals).", flush=True)
 
-        # Note: no 0.1mm merge escalation — logs showed it increases open edges
-        # (57→61) by welding vertices in overlapping AI mesh shells that shouldn't merge.
+                if aggressive:
+                    remove_interior_faces_safe(model)
 
-        # Only warn if open_edges is very high (>200). Meshy AI models typically
-        # have 50-90 structural open edges from intentional overlapping geometry
-        # (glasses in face, arms in shirt). Marketiger heals these automatically.
-        if open_e > 200:
+        if open_e > threshold:
             print(f"  🚨 WARNING: Exporting with {open_e} open edges. Model may have visible holes.", flush=True)
         elif open_e > 0:
             print(f"  ℹ️  {open_e} open edges remain (structural AI mesh overlap — Marketiger will heal).", flush=True)
     else:
         print("⚡ Skipping manifold gate (skip_repair=true)", flush=True)
 
-    # ====================== GHOST SHELL REMOVAL ======================
-    # Now only runs in full repair mode to prevent deleting legitimate clothing details in raw mode.
+    # ====================== GHOST SHELL REMOVAL (final) ======================
     if not skip_repair:
-        remove_ghost_shells(model, min_faces=50)
+        if aggressive:
+            # Already did an early pass; do a final light pass
+            remove_ghost_shells_safe(model, min_faces=15, bottom_protect_ratio=0.18)
+        else:
+            remove_ghost_shells(model, min_faces=50)
     else:
-        print("⚡ Skipping ghost shell removal in SKIP_REPAIR mode (to preserve pleats and fine details)", flush=True)
-
+        print("⚡ Skipping ghost shell removal in SKIP_REPAIR mode", flush=True)
 
     # ====================== UV OUTLIER FIX / TRIANGULATE / NORMALS ======================
-    # In SKIP_REPAIR (add-base-raw) mode we deliberately leave the original model
-    # completely untouched: no UV changes, no triangulation, no normal flips.
-    # Only scale + base (or keychain) addition happen. Export may still triangulate.
     if not skip_repair:
-        # Safety net: detect and fix faces whose UVs point to a completely
-        # wrong part of the texture atlas (caused by remove_doubles merging
-        # overlapping shell vertices, dissolve_degenerate, etc.).
-        # Runs BEFORE triangulation to halve the face count (~365K vs ~730K).
-        print("Running UV outlier detection...")
-        fix_uv_outliers(model, uv_dist_threshold=0.15)
+        uv_threshold = 0.08 if aggressive else 0.15
 
-        # Guarantee all faces are triangles — ngons from fill_holes can cause
-        # issues with some slicers and Marketiger's validator.
+        print("Running UV outlier detection...")
+        fix_uv_outliers(model, uv_dist_threshold=uv_threshold)
+
         print("Triangulating mesh...")
         bpy.ops.object.select_all(action='DESELECT')
         model.select_set(True)
@@ -1350,25 +1420,24 @@ try:
         bpy.ops.object.modifier_apply(modifier=mod.name)
         print(f"  ✅ Triangulated: {len(model.data.polygons)} triangles", flush=True)
 
-        # Per-shell signed-volume normals correction.
-        # This MUST run after triangulation (so all faces are tris for accurate
-        # volume computation) and before export (so the OBJ has correct normals).
+        # Second UV pass after triangulation (catches any remaining outliers)
+        if aggressive:
+            print("🔥 Second UV outlier pass after triangulation...", flush=True)
+            fix_uv_outliers(model, uv_dist_threshold=uv_threshold)
+
         print("Running final per-shell normals fix...")
         flipped = fix_normals_per_shell(model)
         if flipped > 0:
             print(f"  ✅ Fixed {flipped} inward-facing faces before export", flush=True)
     else:
-        print("⚡ SKIP_REPAIR mode: skipping UV outlier fix, triangulation and normals fix "
-              "(original model faces & normals left 100% untouched)", flush=True)
+        print("⚡ SKIP_REPAIR mode: skipping UV outlier fix, triangulation and normals fix", flush=True)
 
     # ====================== EXPORT ======================
-    # Apply all transforms one final time
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
     bpy.context.view_layer.objects.active = model
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
-    # Verify output scale: log bounding-box dimensions in mm
     bmin_exp, bmax_exp = get_bounds([model])
     print(f"Export dimensions (mm): X={bmax_exp.x - bmin_exp.x:.2f}, Y={bmax_exp.y - bmin_exp.y:.2f}, Z={bmax_exp.z - bmin_exp.z:.2f}")
 
@@ -1378,15 +1447,12 @@ try:
         'filepath':                output_path,
         'export_selected_objects': True,
         'export_materials':        True,
-        # export_colors omitted: Marketiger may reject vertex colour data
         'export_normals':          True,
         'export_uv':               True,
-        'path_mode':               'STRIP',  # outputs "model.png" not an absolute path in MTL
-        'global_scale':            1.0,      # model units are mm; keep 1:1
+        'path_mode':               'STRIP',
+        'global_scale':            1.0,
     }
 
-    # We already triangulated via modifier, so export_triangulated_mesh is
-    # not needed, but set it if available for extra safety.
     try:
         export_kwargs['export_triangulated_mesh'] = True
         bpy.ops.wm.obj_export(**export_kwargs)
@@ -1394,7 +1460,6 @@ try:
         del export_kwargs['export_triangulated_mesh']
         bpy.ops.wm.obj_export(**export_kwargs)
 
-    # Log MTL contents so texture reference can be verified in Railway logs
     mtl_path = output_path.replace('.obj', '.mtl')
     if os.path.exists(mtl_path):
         with open(mtl_path, 'r') as f:
