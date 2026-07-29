@@ -27,9 +27,9 @@ def test_blender():
         return {"error": str(e)}
 
 class BaseRequest(BaseModel):
-    model_url: str
-    size_cm: float
-    order_nr: str  # Toegevoegd voor de bestandsnaam
+    model_url: str = "https://drive.google.com/uc?export=download&id="
+    size_cm: float = 10
+    order_nr: str = "1000" # Toegevoegd voor de bestandsnaam
     add_base: bool = True
     add_keychain: bool = False
 
