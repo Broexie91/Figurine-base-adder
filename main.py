@@ -8,6 +8,10 @@ import subprocess
 import os
 import zipfile
 import io
+import json
+import struct
+import base64
+from PIL import Image
 
 app = FastAPI(title="GLB Figurine Base Adder")
 
@@ -25,6 +29,155 @@ def test_blender():
         }
     except Exception as e:
         return {"error": str(e)}
+
+_PBR_NON_ALBEDO_HINTS = (
+    "normal", "norm", "nor_", "_nor", "rough", "metal", "metallic",
+    "ao", "orm", "arm", "specular", "spec", "emiss", "emit",
+    "height", "disp", "bump", "gloss", "occlusion", "cavity",
+)
+
+
+def _looks_like_non_albedo(name: str) -> bool:
+    n = (name or "").lower()
+    return any(hint in n for hint in _PBR_NON_ALBEDO_HINTS)
+
+
+def _parse_glb_chunks(glb_bytes: bytes):
+    if len(glb_bytes) < 12 or glb_bytes[:4] != b"glTF":
+        return None, None
+    offset = 12
+    json_chunk = None
+    bin_chunk = None
+    while offset + 8 <= len(glb_bytes):
+        chunk_len, chunk_type = struct.unpack_from("<I4s", glb_bytes, offset)
+        offset += 8
+        chunk = glb_bytes[offset:offset + chunk_len]
+        offset += chunk_len
+        if chunk_type == b"JSON":
+            json_chunk = json.loads(chunk.decode("utf-8"))
+        elif chunk_type == b"BIN\x00":
+            bin_chunk = chunk
+    return json_chunk, bin_chunk
+
+
+def _glb_image_bytes(gltf: dict, bin_chunk: bytes, image_index: int):
+    images = gltf.get("images") or []
+    if image_index is None or image_index < 0 or image_index >= len(images):
+        return None, None
+    image = images[image_index]
+    mime = image.get("mimeType") or ""
+    name = image.get("name") or ""
+    uri = image.get("uri")
+    if uri:
+        if uri.startswith("data:") and "," in uri:
+            header, b64 = uri.split(",", 1)
+            mime = mime or header.split(";")[0].replace("data:", "")
+            return base64.b64decode(b64), (name, mime)
+        return None, None
+    if bin_chunk is None:
+        return None, None
+    views = gltf.get("bufferViews") or []
+    view_index = image.get("bufferView")
+    if view_index is None or view_index >= len(views):
+        return None, None
+    view = views[view_index]
+    start = int(view.get("byteOffset") or 0)
+    length = int(view["byteLength"])
+    return bin_chunk[start:start + length], (name, mime)
+
+
+def extract_glb_albedo_png(glb_path: Path, out_png: Path) -> bool:
+    """
+    Pull the Base Color / albedo map out of a GLB and write model.png.
+
+    This bypasses Blender node order, so Meshy PBR extras (normal/rough/metal)
+    cannot overwrite the print texture.
+    """
+    gltf, bin_chunk = _parse_glb_chunks(glb_path.read_bytes())
+    if not gltf:
+        print("GLB albedo extract: not a GLB / missing JSON chunk")
+        return False
+
+    textures = gltf.get("textures") or []
+    materials = gltf.get("materials") or []
+    images = gltf.get("images") or []
+    candidates = []
+
+    for mat in materials:
+        pbr = mat.get("pbrMetallicRoughness") or {}
+        tex_info = pbr.get("baseColorTexture") or {}
+        tex_index = tex_info.get("index")
+        if tex_index is None or tex_index >= len(textures):
+            continue
+        image_index = textures[tex_index].get("source")
+        blob, meta = _glb_image_bytes(gltf, bin_chunk, image_index)
+        if not blob:
+            continue
+        name, mime = meta
+        score = 20 if _looks_like_non_albedo(name) else 100
+        candidates.append((score, len(blob), blob, name or mime or "baseColor", mime))
+
+    for i, image in enumerate(images):
+        blob, meta = _glb_image_bytes(gltf, bin_chunk, i)
+        if not blob:
+            continue
+        name, mime = meta
+        label = name or mime or f"image[{i}]"
+        score = 8 if _looks_like_non_albedo(label) else 40
+        candidates.append((score, len(blob), blob, label, mime))
+
+    if not candidates:
+        print("GLB albedo extract: no embedded images found")
+        return False
+
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    score, size, blob, label, mime = candidates[0]
+    print(f"GLB albedo extract: picked '{label}' ({size} bytes, mime={mime}, score={score})")
+    try:
+        img = Image.open(io.BytesIO(blob))
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA") if "A" in img.getbands() else img.convert("RGB")
+        img.save(out_png, format="PNG")
+        print(f"GLB albedo extract: wrote {out_png} ({out_png.stat().st_size} bytes)")
+        return True
+    except Exception as e:
+        print(f"GLB albedo extract: Pillow decode failed ({e})")
+        if blob[:8] == b"\x89PNG\r\n\x1a\n":
+            out_png.write_bytes(blob)
+            print(f"GLB albedo extract: wrote raw PNG {out_png}")
+            return True
+        return False
+
+
+def rewrite_mtl_map_kd(mtl_path: Path, texture_filename: str = "model.png") -> None:
+    if not mtl_path.exists():
+        print("MTL rewrite: file not found")
+        return
+    lines = mtl_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    new_lines = []
+    rewrote = 0
+    for line in lines:
+        if line.lstrip().lower().startswith("map_kd"):
+            new_lines.append(f"map_Kd {texture_filename}\n")
+            rewrote += 1
+        else:
+            new_lines.append(line)
+    if rewrote == 0:
+        injected = False
+        with_inject = []
+        for line in new_lines:
+            with_inject.append(line)
+            if (not injected) and line.lstrip().lower().startswith("newmtl"):
+                with_inject.append(f"map_Kd {texture_filename}\n")
+                injected = True
+        if not injected:
+            with_inject.append(f"map_Kd {texture_filename}\n")
+        new_lines = with_inject
+        print(f"MTL rewrite: injected map_Kd {texture_filename}")
+    else:
+        print(f"MTL rewrite: rewrote {rewrote} map_Kd line(s) -> {texture_filename}")
+    mtl_path.write_text("".join(new_lines), encoding="utf-8")
+
 
 class BaseRequest(BaseModel):
     model_url: str = "https://drive.google.com/uc?export=download&id="
@@ -91,21 +244,29 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
                     detail=f"Blender verwerking mislukt. Error log: {error_log}"
                 )
 
-            # 3. ZIP bestand genereren
+            # 3. Force albedo from the source GLB + consistent MTL link
+            albedo_png = tmp_path / "model.png"
+            extracted = extract_glb_albedo_png(input_glb, albedo_png)
+            if extracted:
+                print("Using albedo extracted from source GLB (overrides Blender image pick)")
+            elif albedo_png.exists():
+                print("GLB extract failed; keeping Blender-exported model.png")
+            else:
+                print("WARNING: no model.png after Blender or GLB extract")
+            rewrite_mtl_map_kd(tmp_path / "model.mtl", "model.png")
+
+            # 4. ZIP bestand genereren
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in tmp_path.iterdir():
-                    # Pak alle relevante output bestanden (.obj, .mtl en textures)
                     if file_path.name in ("model.obj", "model.mtl", "model.png", "model.jpg"):
                         zipf.write(file_path, arcname=file_path.name)
 
             zip_buffer.seek(0)
             zip_data = zip_buffer.read()
 
-            # Dynamische bestandsnaam samenstellen
             export_filename = f"3DModel_{request.order_nr}.zip"
 
-            # 4. ZIP terugsturen naar de gebruiker
             return Response(
                 content=zip_data,
                 media_type="application/zip",
@@ -115,7 +276,6 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
             )
 
         except subprocess.TimeoutExpired as e:
-            # Dump whatever partial output Blender produced before the timeout
             partial_out = (e.output or b"").decode(errors="replace") if isinstance(e.output, bytes) else (e.output or "")
             partial_err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
             print("--- Blender TIMEOUT partial stdout ---")
