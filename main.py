@@ -34,9 +34,9 @@ class BaseRequest(BaseModel):
     add_keychain: bool = False
 
 
-async def _process_model(request: BaseRequest, skip_repair: bool = False, aggressive: bool = False):
+async def _process_model(request: BaseRequest, skip_repair: bool = False, aggressive: bool = False, preserve_uv: bool = False):
     """
-    Shared logic for /add-base, /add-base-raw and /add-base-tripo endpoints.
+    Shared logic for /add-base, /add-base-raw, /add-base-tripo and /add-base-meshy.
     Downloads the GLB, runs Blender, and returns a ZIP response.
     """
     # Validatie van de input
@@ -62,15 +62,16 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
             f.write(content)
 
         print(f"Input file downloaded for order {request.order_nr}, size: {len(content)} bytes")
-        print(f"Flags → skip_repair={skip_repair}, aggressive={aggressive}")
-        
+        print(f"Flags → skip_repair={skip_repair}, aggressive={aggressive}, preserve_uv={preserve_uv}")
+
         # 2. Blender aanroepen met XVFB (headless display)
-        # Arguments: input, output, size_cm, add_base, add_keychain, skip_repair, aggressive
+        # Arguments: input, output, size_cm, add_base, add_keychain, skip_repair, aggressive, preserve_uv
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_process.py", "--",
             str(input_glb), str(output_obj), str(request.size_cm),
-            str(request.add_base), str(request.add_keychain), str(skip_repair), str(aggressive)
+            str(request.add_base), str(request.add_keychain),
+            str(skip_repair), str(aggressive), str(preserve_uv)
         ]
 
         try:
@@ -95,9 +96,8 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in tmp_path.iterdir():
                     # Pak alle relevante output bestanden (.obj, .mtl en textures)
-                    if file_path.is_file() and file_path.suffix.lower() in ['.obj', '.mtl', '.png', '.jpg']:
-                        clean_name = "model" + file_path.suffix.lower()
-                        zipf.write(file_path, arcname=clean_name)
+                    if file_path.name in ("model.obj", "model.mtl", "model.png", "model.jpg"):
+                        zipf.write(file_path, arcname=file_path.name)
 
             zip_buffer.seek(0)
             zip_data = zip_buffer.read()
@@ -157,4 +157,22 @@ async def add_base_tripo(request: BaseRequest):
     Use this when the standard /add-base leaves too many non-manifold edges,
     interior faces or texture artefacts on Tripo-generated models.
     """
-    return await _process_model(request, skip_repair=False, aggressive=True)
+    return await _process_model(request, skip_repair=False, aggressive=True, preserve_uv=False)
+
+
+@app.post("/add-base-meshy")
+async def add_base_meshy(request: BaseRequest):
+    """
+    Conservative pipeline for Meshy AI models.
+
+    Meshy GLBs usually have clean UVs and a full PBR stack (albedo +
+    normal/rough/metal). Aggressive Tripo repair would remap UV islands
+    and the old texture exporter could pick a non-albedo map.
+
+    This endpoint:
+    - Adds the same convex base as the other routes
+    - Runs only mild mesh repair (no deep_repair / ghost-shell wipe / UV outlier)
+    - Exports the Principled Base Color map as model.png
+    - Rewrites the MTL so map_Kd always points at model.png
+    """
+    return await _process_model(request, skip_repair=False, aggressive=False, preserve_uv=True)
