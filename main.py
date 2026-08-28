@@ -18,7 +18,7 @@ app = FastAPI(title="GLB Figurine Base Adder")
 @app.get("/test-blender")
 def test_blender():
     try:
-        cmd = ["blender", "-b", "--python", "/app/blender_process.py", "--",
+        cmd = ["blender", "-b", "--python", "/app/blender_wrapper.py", "--",
                "test_input.glb", "test_output.obj", "10", "true", "false", "false"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return {
@@ -87,12 +87,7 @@ def _glb_image_bytes(gltf: dict, bin_chunk: bytes, image_index: int):
 
 
 def extract_glb_albedo_png(glb_path: Path, out_png: Path) -> bool:
-    """
-    Pull the Base Color / albedo map out of a GLB and write model.png.
-
-    This bypasses Blender node order, so Meshy PBR extras (normal/rough/metal)
-    cannot overwrite the print texture.
-    """
+    """Pull the Base Color / albedo map out of a GLB and write model.png."""
     gltf, bin_chunk = _parse_glb_chunks(glb_path.read_bytes())
     if not gltf:
         print("GLB albedo extract: not a GLB / missing JSON chunk")
@@ -182,17 +177,12 @@ def rewrite_mtl_map_kd(mtl_path: Path, texture_filename: str = "model.png") -> N
 class BaseRequest(BaseModel):
     model_url: str = "https://drive.google.com/uc?export=download&id="
     size_cm: float = 10
-    order_nr: str = "1000" # Toegevoegd voor de bestandsnaam
+    order_nr: str = "1000"
     add_base: bool = True
     add_keychain: bool = False
 
 
 async def _process_model(request: BaseRequest, skip_repair: bool = False, aggressive: bool = False, preserve_uv: bool = False):
-    """
-    Shared logic for /add-base, /add-base-raw, /add-base-tripo and /add-base-meshy.
-    Downloads the GLB, runs Blender, and returns a ZIP response.
-    """
-    # Validatie van de input
     if request.size_cm <= 0:
         raise HTTPException(status_code=400, detail="size_cm moet een positief getal zijn")
 
@@ -201,7 +191,6 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
         input_glb = tmp_path / "input.glb"
         output_obj = tmp_path / "model.obj"
 
-        # 1. Download model
         try:
             async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
                 response = await client.get(request.model_url)
@@ -215,13 +204,11 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
             f.write(content)
 
         print(f"Input file downloaded for order {request.order_nr}, size: {len(content)} bytes")
-        print(f"Flags → skip_repair={skip_repair}, aggressive={aggressive}, preserve_uv={preserve_uv}")
+        print(f"Flags -> skip_repair={skip_repair}, aggressive={aggressive}, preserve_uv={preserve_uv}")
 
-        # 2. Blender aanroepen met XVFB (headless display)
-        # Arguments: input, output, size_cm, add_base, add_keychain, skip_repair, aggressive, preserve_uv
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
-            "blender", "-b", "--python", "/app/blender_process.py", "--",
+            "blender", "-b", "--python", "/app/blender_wrapper.py", "--",
             str(input_glb), str(output_obj), str(request.size_cm),
             str(request.add_base), str(request.add_keychain),
             str(skip_repair), str(aggressive), str(preserve_uv)
@@ -230,7 +217,6 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-            # Always flush Blender output to Railway logs so we can debug any run
             print("--- Blender stdout ---")
             print(result.stdout)
             print("--- Blender stderr ---")
@@ -244,7 +230,6 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
                     detail=f"Blender verwerking mislukt. Error log: {error_log}"
                 )
 
-            # 3. Force albedo from the source GLB + consistent MTL link
             albedo_png = tmp_path / "model.png"
             extracted = extract_glb_albedo_png(input_glb, albedo_png)
             if extracted:
@@ -255,7 +240,6 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
                 print("WARNING: no model.png after Blender or GLB extract")
             rewrite_mtl_map_kd(tmp_path / "model.mtl", "model.png")
 
-            # 4. ZIP bestand genereren
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
                 for file_path in tmp_path.iterdir():
@@ -264,15 +248,11 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
 
             zip_buffer.seek(0)
             zip_data = zip_buffer.read()
-
             export_filename = f"3DModel_{request.order_nr}.zip"
-
             return Response(
                 content=zip_data,
                 media_type="application/zip",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{export_filename}"'
-                }
+                headers={"Content-Disposition": f'attachment; filename="{export_filename}"'}
             )
 
         except subprocess.TimeoutExpired as e:
@@ -296,43 +276,17 @@ async def add_base(request: BaseRequest):
 
 @app.post("/add-base-raw")
 async def add_base_raw(request: BaseRequest):
-    """
-    Process GLB model WITHOUT mesh repair.
-    Only does: import, scale, base/text/keychain, texture export, OBJ export.
-    Lets Marketiger handle all mesh fixing and hole repair.
-    """
+    """Process GLB model WITHOUT mesh repair."""
     return await _process_model(request, skip_repair=True, aggressive=False)
 
 
 @app.post("/add-base-tripo")
 async def add_base_tripo(request: BaseRequest):
-    """
-    Aggressive repair pipeline optimized for Tripo AI models.
-
-    - Stronger non-manifold / zero-face / interior-face / shell cleanup
-    - Better UV protection (stricter outlier detection) to prevent vlekken/strepen
-    - Safety guards: never deletes feet or large geometry drops
-    - Same base generation + texture preservation as /add-base
-
-    Use this when the standard /add-base leaves too many non-manifold edges,
-    interior faces or texture artefacts on Tripo-generated models.
-    """
+    """Aggressive repair pipeline optimized for Tripo AI models."""
     return await _process_model(request, skip_repair=False, aggressive=True, preserve_uv=False)
 
 
 @app.post("/add-base-meshy")
 async def add_base_meshy(request: BaseRequest):
-    """
-    Conservative pipeline for Meshy AI models.
-
-    Meshy GLBs usually have clean UVs and a full PBR stack (albedo +
-    normal/rough/metal). Aggressive Tripo repair would remap UV islands
-    and the old texture exporter could pick a non-albedo map.
-
-    This endpoint:
-    - Adds the same convex base as the other routes
-    - Runs only mild mesh repair (no deep_repair / ghost-shell wipe / UV outlier)
-    - Exports the Principled Base Color map as model.png
-    - Rewrites the MTL so map_Kd always points at model.png
-    """
+    """Conservative pipeline for Meshy AI models (preserve UVs, albedo-only texture)."""
     return await _process_model(request, skip_repair=False, aggressive=False, preserve_uv=True)
