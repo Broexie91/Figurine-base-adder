@@ -49,7 +49,7 @@ RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Je code
-COPY main.py blender_process.py ./
+COPY main.py blender_process.py blender_wrapper.py ./
 
 EXPOSE 8080
 
