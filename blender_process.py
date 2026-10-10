@@ -155,19 +155,47 @@ def check_manifold(obj):
     return len(open_edges), len(non_manifold_verts)
 
 
-def safety_snapshot(obj):
+# Mesh backups taken by safety_snapshot(), restored by check_safety() on failure.
+_SAFETY_BACKUPS = {}
+
+
+def _face_count_and_height(obj):
     bmin, bmax = get_bounds([obj])
-    return len(obj.data.vertices), (bmax.z - bmin.z)
+    return len(obj.data.polygons), (bmax.z - bmin.z)
 
 
-def check_safety(obj, verts_before, height_before, label="step"):
-    verts_after, height_after = safety_snapshot(obj)
-    vert_ratio = verts_after / max(verts_before, 1)
+def safety_snapshot(obj):
+    """
+    Measure faces + height and keep a copy of the mesh so check_safety() can roll back.
+
+    Faces are compared instead of vertices: welding the UV-seam splits of an
+    imported GLB legitimately removes 8-15% of the vertices, which used to
+    trigger false "SAFETY ABORT" messages.
+    """
+    old = _SAFETY_BACKUPS.pop(obj.name, None)
+    if old is not None and old.users == 0:
+        bpy.data.meshes.remove(old)
+    _SAFETY_BACKUPS[obj.name] = obj.data.copy()
+    return _face_count_and_height(obj)
+
+
+def check_safety(obj, faces_before, height_before, label="step"):
+    faces_after, height_after = _face_count_and_height(obj)
+    face_ratio = faces_after / max(faces_before, 1)
     height_ratio = height_after / max(height_before, 1e-6)
-    if vert_ratio < 0.92 or height_ratio < 0.97:
-        print(f"  🚨 SAFETY ABORT after {label}: verts {verts_before}→{verts_after} ({vert_ratio:.1%}), height {height_before:.1f}→{height_after:.1f}mm ({height_ratio:.1%})", flush=True)
+    backup = _SAFETY_BACKUPS.pop(obj.name, None)
+    if face_ratio < 0.92 or height_ratio < 0.97:
+        print(f"  🚨 SAFETY ABORT after {label}: faces {faces_before}→{faces_after} ({face_ratio:.1%}), height {height_before:.1f}→{height_after:.1f}mm ({height_ratio:.1%})", flush=True)
+        if backup is not None:
+            damaged = obj.data
+            obj.data = backup
+            if damaged.users == 0:
+                bpy.data.meshes.remove(damaged)
+            print(f"  ↩️ Rolled back {label}: restored mesh from before this step", flush=True)
         return False
-    print(f"  ✅ Safety OK after {label}: verts={verts_after}, height={height_after:.1f}mm", flush=True)
+    if backup is not None and backup.users == 0:
+        bpy.data.meshes.remove(backup)
+    print(f"  ✅ Safety OK after {label}: faces={faces_after}, height={height_after:.1f}mm", flush=True)
     return True
 
 
@@ -695,7 +723,115 @@ def fix_uv_outliers(obj, uv_dist_threshold=0.15):
     return len(outliers)
 
 
-def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normals=True):
+def weld_uv_seams(obj, dist=1e-4):
+    """
+    Merge only the vertices the glTF importer split along UV seams.
+
+    Unlike repair_mesh() this does not dissolve small faces or fill holes, so an
+    already repaired (manifold, single-shell) model keeps all of its detail.
+    UVs stay per-loop, so the texture mapping is unchanged.
+    """
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    before = len(bm.verts)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=dist)
+    welded = before - len(bm.verts)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    print(f"  🧵 weld_uv_seams: merged {welded} split vertices (dist={dist}mm)", flush=True)
+    return welded
+
+
+def find_neutral_grey_uv(obj, target=0.627, step=8, radius=3):
+    """
+    Find a UV coordinate in the model's base-color texture that is a flat, neutral grey.
+
+    Base faces are pinned to a single UV. With only model.png (no MTL materials),
+    the base gets the colour of that pixel, so pick one that actually looks like
+    the Base_Grey material instead of whatever sits in the texture corner.
+    Returns None when the model has no image texture.
+    """
+    import numpy as np
+    img = None
+    for mat in obj.data.materials:
+        if mat and mat.use_nodes:
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image and node.image.size[0] > 0:
+                    img = node.image
+                    break
+        if img:
+            break
+    if img is None:
+        print("  ⚠️  No texture found for grey base UV", flush=True)
+        return None
+    w, h = img.size
+    px = np.empty(w * h * 4, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    rgb = px.reshape(h, w, 4)[::step, ::step, :3]
+    del px
+    # Score: distance to target grey + colourfulness + non-uniformity of the
+    # surrounding (2*radius+1)^2 samples, so filtering never bleeds in other colours.
+    grey_dist = np.abs(rgb.mean(axis=2) - target)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
+    pad = np.pad(rgb, ((radius, radius), (radius, radius), (0, 0)), mode='edge')
+    local = np.zeros(rgb.shape[:2], dtype=np.float32)
+    for dy in range(2 * radius + 1):
+        for dx in range(2 * radius + 1):
+            local = np.maximum(local, np.abs(pad[dy:dy + rgb.shape[0], dx:dx + rgb.shape[1]] - rgb).max(axis=2))
+    score = grey_dist + 2.0 * chroma + 2.0 * local
+    y, x = np.unravel_index(int(np.argmin(score)), score.shape)
+    u = (x * step + 0.5) / w
+    v = (y * step + 0.5) / h
+    c = rgb[y, x]
+    print(f"  🎯 Neutral grey texel for base: uv=({u:.4f}, {v:.4f}) rgb=({c[0]:.2f}, {c[1]:.2f}, {c[2]:.2f}) in '{img.name}'", flush=True)
+    return (u, v)
+
+
+def remove_boolean_crumbs(obj, max_volume_mm3=1.0):
+    """
+    Delete tiny loose shells (all but the largest) that a boolean leaves behind,
+    e.g. slivers of a dress hem resting on the base top. Only used in clean mode,
+    where the model was a single shell before the base union.
+    """
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.faces.ensure_lookup_table()
+    visited = set()
+    shells = []
+    for face in bm.faces:
+        if face.index in visited:
+            continue
+        shell = []
+        queue = [face]
+        while queue:
+            f = queue.pop()
+            if f.index in visited:
+                continue
+            visited.add(f.index)
+            shell.append(f)
+            for edge in f.edges:
+                for linked_face in edge.link_faces:
+                    if linked_face.index not in visited:
+                        queue.append(linked_face)
+        shells.append(shell)
+    shells.sort(key=len, reverse=True)
+    to_delete = []
+    for shell in shells[1:]:
+        volume = abs(sum(f.calc_center_median().dot(f.normal) * f.calc_area() for f in shell) / 3.0)
+        if volume < max_volume_mm3:
+            to_delete.extend(shell)
+            print(f"  🗑️ Boolean crumb: {len(shell)} faces, {volume:.4f} mm³", flush=True)
+    if to_delete:
+        bmesh.ops.delete(bm, geom=to_delete, context='FACES')
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    bm.free()
+    print(f"  ✅ remove_boolean_crumbs: {len(shells)} shell(s) → removed {len(to_delete)} faces", flush=True)
+
+
+def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normals=True,
+                         solvers=('FLOAT', 'EXACT')):
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
     bpy.context.view_layer.objects.active = target_obj
@@ -728,13 +864,12 @@ def robust_boolean_union(target_obj, tool_obj, modifier_name="Union", fix_normal
             if mod_check:
                 target_obj.modifiers.remove(mod_check)
             return False
-    if _try_solver('FLOAT'):
-        bpy.data.objects.remove(tool_obj, do_unlink=True)
-        return True
-    print(f"  ⚠️ FLOAT failed, trying EXACT for {modifier_name}...")
-    if _try_solver('EXACT'):
-        bpy.data.objects.remove(tool_obj, do_unlink=True)
-        return True
+    for i, solver_name in enumerate(solvers):
+        if i > 0:
+            print(f"  ⚠️ {solvers[i - 1]} failed, trying {solver_name} for {modifier_name}...")
+        if _try_solver(solver_name):
+            bpy.data.objects.remove(tool_obj, do_unlink=True)
+            return True
     print(f"🚨 All boolean solvers failed for {modifier_name}. Falling back to JOIN + weld...")
     bpy.ops.object.select_all(action='DESELECT')
     target_obj.select_set(True)
@@ -771,9 +906,17 @@ try:
     add_keychain   = argv[4].lower() == 'true' if len(argv) > 4 else False
     skip_repair    = argv[5].lower() == 'true' if len(argv) > 5 else False
     aggressive     = argv[6].lower() == 'true' if len(argv) > 6 else False
+    clean          = argv[8].lower() == 'true' if len(argv) > 8 else False
 
     desired_height_mm = size_cm * 10
 
+    if clean:
+        # Already repaired model (manifold, one shell, one texture): only weld the
+        # glTF UV-seam splits and add the base. All repair steps are skipped so the
+        # geometry and UVs stay exactly as delivered.
+        print("🧼 CLEAN mode: weld UV seams + add base, no repair/decimation", flush=True)
+        skip_repair = True
+        aggressive = False
     if skip_repair:
         print("⚡ SKIP_REPAIR mode: all mesh repair/fixing will be skipped", flush=True)
     if aggressive:
@@ -814,6 +957,11 @@ try:
     model.scale *= scale_factor
     bpy.ops.object.transform_apply(scale=True)
     print(f"Model scaled by {scale_factor:.4f} → target height {desired_height_mm}mm", flush=True)
+
+    if clean:
+        weld_uv_seams(model, dist=1e-4)
+        open_e, non_m = check_manifold(model)
+        print(f"  Manifold after weld: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
 
     # EARLY CLEANUP — only when the mesh is extremely broken.
     # Uses closest-face UV assignment (follows geometry, not UV-island order).
@@ -860,7 +1008,7 @@ try:
             verts_b, height_b = safety_snapshot(model)
             remove_ghost_shells_safe(model, min_faces=12, bottom_protect_ratio=0.18)
             if not check_safety(model, verts_b, height_b, "ghost_shells_early"):
-                print("  ⚠️ Ghost shell removal was too aggressive — continuing with remaining geometry", flush=True)
+                print("  ⚠️ Ghost shell removal was too aggressive — rolled back, continuing with full geometry", flush=True)
 
         repair_mesh(model, merge_threshold=0.01)
 
@@ -903,7 +1051,14 @@ try:
         base.data.materials.append(gray_mat)
         if model.data.uv_layers.active:
             base.data.uv_layers.new(name=model.data.uv_layers.active.name)
-        robust_boolean_union(model, base, "Base_Union", fix_normals=not skip_repair)
+        if clean:
+            # EXACT keeps a watertight result when both inputs are watertight
+            # (the MANIFOLD solver rejects glTF-imported Tripo meshes).
+            robust_boolean_union(model, base, "Base_Union", fix_normals=True,
+                                 solvers=('EXACT', 'FLOAT'))
+            remove_boolean_crumbs(model, max_volume_mm3=1.0)
+        else:
+            robust_boolean_union(model, base, "Base_Union", fix_normals=not skip_repair)
         base_top_z = foot_bmin_z + 0.5
         base_faces_fixed = 0
         for poly in model.data.polygons:
@@ -915,7 +1070,8 @@ try:
         print("Pinning out-of-range UVs after base union...")
         pin_new_face_uvs(model, uv_coord=(0.008, 0.008))
         print("Pinning base region UVs to grey sentinel...")
-        pin_base_face_uvs(model, base_top_z=base_top_z, uv_coord=(0.008, 0.008))
+        base_uv = find_neutral_grey_uv(model) if clean else None
+        pin_base_face_uvs(model, base_top_z=base_top_z, uv_coord=base_uv or (0.008, 0.008))
         if not skip_repair:
             print("Running post-boolean repair...")
             repair_mesh(model, merge_threshold=0.01)
@@ -1066,6 +1222,10 @@ try:
     else:
         print("⚡ SKIP_REPAIR mode: skipping UV outlier fix, triangulation and normals fix", flush=True)
 
+    if clean:
+        open_e, non_m = check_manifold(model)
+        print(f"CLEAN final check: open_edges={open_e}, non_manifold_verts={non_m}", flush=True)
+
     # EXPORT
     bpy.ops.object.select_all(action='DESELECT')
     model.select_set(True)
@@ -1080,7 +1240,7 @@ try:
         'filepath': output_path,
         'export_selected_objects': True,
         'export_materials': True,
-        'export_normals': True,
+        'export_normals': not clean,  # slicers recompute normals; saves ~1/3 of the OBJ size
         'export_uv': True,
         'path_mode': 'STRIP',
         'global_scale': 1.0,
