@@ -182,7 +182,7 @@ class BaseRequest(BaseModel):
     add_keychain: bool = False
 
 
-async def _process_model(request: BaseRequest, skip_repair: bool = False, aggressive: bool = False, preserve_uv: bool = False):
+async def _process_model(request: BaseRequest, skip_repair: bool = False, aggressive: bool = False, preserve_uv: bool = False, clean: bool = False):
     if request.size_cm <= 0:
         raise HTTPException(status_code=400, detail="size_cm moet een positief getal zijn")
 
@@ -204,14 +204,14 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
             f.write(content)
 
         print(f"Input file downloaded for order {request.order_nr}, size: {len(content)} bytes")
-        print(f"Flags -> skip_repair={skip_repair}, aggressive={aggressive}, preserve_uv={preserve_uv}")
+        print(f"Flags -> skip_repair={skip_repair}, aggressive={aggressive}, preserve_uv={preserve_uv}, clean={clean}")
 
         cmd = [
             "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1024x768x24",
             "blender", "-b", "--python", "/app/blender_wrapper.py", "--",
             str(input_glb), str(output_obj), str(request.size_cm),
             str(request.add_base), str(request.add_keychain),
-            str(skip_repair), str(aggressive), str(preserve_uv)
+            str(skip_repair), str(aggressive), str(preserve_uv), str(clean)
         ]
 
         try:
@@ -290,3 +290,9 @@ async def add_base_tripo(request: BaseRequest):
 async def add_base_meshy(request: BaseRequest):
     """Conservative pipeline for Meshy AI models (preserve UVs, albedo-only texture)."""
     return await _process_model(request, skip_repair=False, aggressive=False, preserve_uv=True)
+
+
+@app.post("/add-base-clean")
+async def add_base_clean(request: BaseRequest):
+    """Already repaired model (manifold, one shell, one texture): weld UV seams and add the base only."""
+    return await _process_model(request, clean=True)
