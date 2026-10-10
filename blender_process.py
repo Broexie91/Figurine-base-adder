@@ -1240,7 +1240,7 @@ try:
         'filepath': output_path,
         'export_selected_objects': True,
         'export_materials': True,
-        'export_normals': True,
+        'export_normals': not clean,  # slicers recompute normals; saves ~1/3 of the OBJ size
         'export_uv': True,
         'path_mode': 'STRIP',
         'global_scale': 1.0,

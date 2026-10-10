@@ -86,8 +86,8 @@ def _glb_image_bytes(gltf: dict, bin_chunk: bytes, image_index: int):
     return bin_chunk[start:start + length], (name, mime)
 
 
-def extract_glb_albedo_png(glb_path: Path, out_png: Path) -> bool:
-    """Pull the Base Color / albedo map out of a GLB and write model.png."""
+def extract_glb_albedo_png(glb_path: Path, out_png: Path, max_size: int = 0) -> bool:
+    """Pull the Base Color / albedo map out of a GLB and write model.png (optionally downscaled to max_size px)."""
     gltf, bin_chunk = _parse_glb_chunks(glb_path.read_bytes())
     if not gltf:
         print("GLB albedo extract: not a GLB / missing JSON chunk")
@@ -132,7 +132,10 @@ def extract_glb_albedo_png(glb_path: Path, out_png: Path) -> bool:
         img = Image.open(io.BytesIO(blob))
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA") if "A" in img.getbands() else img.convert("RGB")
-        img.save(out_png, format="PNG")
+        if max_size and max(img.size) > max_size:
+            print(f"GLB albedo extract: downscaling {img.size} to max {max_size}px")
+            img.thumbnail((max_size, max_size), Image.LANCZOS)
+        img.save(out_png, format="PNG", optimize=True)
         print(f"GLB albedo extract: wrote {out_png} ({out_png.stat().st_size} bytes)")
         return True
     except Exception as e:
@@ -231,7 +234,8 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
                 )
 
             albedo_png = tmp_path / "model.png"
-            extracted = extract_glb_albedo_png(input_glb, albedo_png)
+            # Clean mode keeps full geometry, so cap the texture to stay under the 100 MB upload limit.
+            extracted = extract_glb_albedo_png(input_glb, albedo_png, max_size=4096 if clean else 0)
             if extracted:
                 print("Using albedo extracted from source GLB (overrides Blender image pick)")
             elif albedo_png.exists():
@@ -239,6 +243,14 @@ async def _process_model(request: BaseRequest, skip_repair: bool = False, aggres
             else:
                 print("WARNING: no model.png after Blender or GLB extract")
             rewrite_mtl_map_kd(tmp_path / "model.mtl", "model.png")
+
+            total_mb = sum(
+                f.stat().st_size for f in tmp_path.iterdir()
+                if f.name in ("model.obj", "model.mtl", "model.png", "model.jpg")
+            ) / 1e6
+            print(f"ZIP contents total (uncompressed): {total_mb:.1f} MB")
+            if total_mb > 100:
+                print("WARNING: ZIP contents exceed 100 MB")
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
